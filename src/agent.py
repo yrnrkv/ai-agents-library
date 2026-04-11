@@ -120,7 +120,7 @@ class LibraryAgent:
                 .all()
             )
         else:
-            keywords = [w for w in re.split(r"\\W+", q) if len(w) > 2]
+            keywords = [w for w in re.split(r"\W+", q) if len(w) > 2]
             if not keywords:
                 return []
             conditions = [BookSearchIndex.searchable_text.ilike(f"%{kw}%") for kw in keywords]

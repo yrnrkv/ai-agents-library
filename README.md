@@ -105,6 +105,9 @@ Example questions:
 - `src/agent.py` - simple AI query agent logic
 - `src/langchain_agent.py` - LangChain wrapper that summarizes DB results
 - `src/main.py` - CLI entrypoint
+- `src/web/app.py` - FastAPI web application
+- `src/web/templates/index.html` - chat UI template
+- `src/web/static/style.css` - CSS styles
 
 ## Notes
 
@@ -112,3 +115,59 @@ Example questions:
 - Business DB and Quick Query DB are intentionally different schemas.
 - Quick Query DB stores only useful query fields (denormalized) for fast reads.
 - This is intentionally lightweight so it runs on any laptop without external AI APIs.
+
+## Web UI (FastAPI)
+
+A simple, modern chat interface that queries the library database and returns responses, powered by Ollama (free local LLM) via LangChain.
+
+### Windows PowerShell — one-time setup
+
+```powershell
+# 1. Clone and enter the repo
+git clone https://github.com/yrnrkv/ai-agents-library.git
+cd ai-agents-library
+
+# 2. Create and activate a virtual environment
+py -m venv .venv
+.\.venv\Scripts\activate
+
+# 3. Install dependencies
+py -m pip install -U pip
+pip install -r requirements.txt
+```
+
+### Install Ollama (free local LLM)
+
+1. Download and install Ollama from **https://ollama.com/download** (Windows installer).
+2. Open a new terminal and pull a model:
+
+```powershell
+ollama pull qwen2.5:7b-instruct
+```
+
+> Other models to try: `llama3.1:8b-instruct`, `gemma3:4b`
+
+### Start the web server
+
+```powershell
+# Make sure your venv is active first: .\.venv\Scripts\activate
+uvicorn src.web.app:app --reload
+```
+
+The server auto-initializes and seeds the database on first run.  
+Open **http://127.0.0.1:8000** in your browser.
+
+### Usage
+
+- **Ollama mode** (default when Ollama is running): uses LangChain + Ollama for natural-language answers.
+- **Rule-based mode**: fast deterministic answers directly from the DB — no LLM required.
+- Use the **model selector** in the sidebar to choose between locally available Ollama models.
+- The sidebar shows Ollama connection status and setup steps.
+
+### API endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/` | Chat UI homepage |
+| `POST` | `/api/chat` | `{ "message": "...", "mode": "ollama"\|"no_llm", "model": "..." }` |
+| `GET` | `/api/health` | DB and Ollama status |
