@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Library Agent</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <!-- ── Header ─────────────────────────────────────────────── -->
+  <header class="site-header">
+    <div class="header-inner">
+      <div class="logo">
+        <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+          <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+        </svg>
+        <span class="logo-text">AI Library Agent</span>
+      </div>
+      <div class="status-group">
+        {% if ollama_ok %}
+          <span class="badge badge-online">● Ollama connected</span>
+        {% else %}
+          <span class="badge badge-offline">○ Ollama offline</span>
+        {% endif %}
+        <a href="/api/health" target="_blank" class="health-link">health</a>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── Main layout ─────────────────────────────────────────── -->
+  <main class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <section class="card">
+        <h3 class="card-title">Settings</h3>
+
+        <label class="form-label" for="modeSelect">Response mode</label>
+        <select id="modeSelect" class="select">
+          <option value="ollama" {% if ollama_ok %}selected{% endif %}>🧠 Ollama (free local LLM)</option>
+          <option value="no_llm" {% if not ollama_ok %}selected{% endif %}>⚡ Rule-based (no LLM)</option>
+        </select>
+
+        <label class="form-label" for="modelSelect">Model</label>
+        <select id="modelSelect" class="select">
+          {% for m in model_options %}
+            <option value="{{ m }}"{% if loop.first %} selected{% endif %}>{{ m }}</option>
+          {% endfor %}
+          <option value="__custom__">Enter custom model…</option>
+        </select>
+        <input id="customModel" class="input hidden" placeholder="e.g. mistral:latest" />
+      </section>
+
+      <section class="card">
+        <h3 class="card-title">Ollama setup</h3>
+        {% if ollama_ok %}
+          <p class="hint hint-ok">✅ Ollama is running at <code>{{ ollama_url }}</code></p>
+        {% else %}
+          <p class="hint hint-warn">⚠️ Ollama is not running. Install it to enable the free local LLM.</p>
+        {% endif %}
+        <ol class="step-list">
+          <li>Download <a href="https://ollama.com/download" target="_blank">ollama.com/download</a></li>
+          <li>Pull a model:<br><code>ollama pull qwen2.5:7b-instruct</code></li>
+          <li>Reload this page</li>
+        </ol>
+      </section>
+
+      <section class="card">
+        <h3 class="card-title">Try asking</h3>
+        <ul class="example-list">
+          <li><button class="example-btn" onclick="fillExample(this)">find books about python</button></li>
+          <li><button class="example-btn" onclick="fillExample(this)">recommend 5 AI books for beginners</button></li>
+          <li><button class="example-btn" onclick="fillExample(this)">show books by Martin Kleppmann</button></li>
+          <li><button class="example-btn" onclick="fillExample(this)">what are top rated books</button></li>
+          <li><button class="example-btn" onclick="fillExample(this)">most borrowed books</button></li>
+        </ul>
+      </section>
+    </aside>
+
+    <!-- Chat area -->
+    <div class="chat-wrapper">
+      <div class="chat-window" id="chatWindow" role="log" aria-live="polite">
+        <!-- Welcome message -->
+        <div class="msg msg-assistant">
+          <div class="avatar avatar-assistant">📚</div>
+          <div class="bubble bubble-assistant">
+            <p>Hello! I'm your AI Library Agent. Ask me anything about books in the library.</p>
+            <p class="msg-meta">{{ 'Powered by Ollama + LangChain' if ollama_ok else 'Running in rule-based mode' }}</p>
+          </div>
+        </div>
+      </div>
+
+      <form class="chat-form" id="chatForm" onsubmit="sendMessage(event)">
+        <textarea
+          id="messageInput"
+          class="chat-input"
+          placeholder="Ask about books, authors, topics…"
+          rows="1"
+          maxlength="500"
+          aria-label="Message"
+        ></textarea>
+        <button type="submit" class="send-btn" id="sendBtn" aria-label="Send">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="22" y1="2" x2="11" y2="13"></line>
+            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+          </svg>
+        </button>
+      </form>
+    </div>
+  </main>
+
+  <script>
+    // ── Helpers ────────────────────────────────────────────────
+    function fillExample(btn) {
+      const input = document.getElementById('messageInput');
+      input.value = btn.textContent.trim();
+      input.focus();
+      autoResize(input);
+    }
+
+    function autoResize(el) {
+      el.style.height = 'auto';
+      el.style.height = Math.min(el.scrollHeight, 160) + 'px';
+    }
+
+    document.getElementById('messageInput').addEventListener('input', function () {
+      autoResize(this);
+    });
+
+    // Ctrl/Cmd+Enter or Enter (without shift) submits
+    document.getElementById('messageInput').addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        document.getElementById('chatForm').dispatchEvent(new Event('submit'));
+      }
+    });
+
+    // Show custom model input when selected
+    document.getElementById('modelSelect').addEventListener('change', function () {
+      const custom = document.getElementById('customModel');
+      if (this.value === '__custom__') {
+        custom.classList.remove('hidden');
+        custom.focus();
+      } else {
+        custom.classList.add('hidden');
+      }
+    });
+
+    // ── Chat ───────────────────────────────────────────────────
+    function getModel() {
+      const sel = document.getElementById('modelSelect');
+      if (sel.value === '__custom__') {
+        return document.getElementById('customModel').value.trim() || 'qwen2.5:7b-instruct';
+      }
+      return sel.value;
+    }
+
+    function appendMessage(role, text, meta) {
+      const win = document.getElementById('chatWindow');
+      const wrapper = document.createElement('div');
+      wrapper.className = `msg msg-${role}`;
+
+      const avatar = document.createElement('div');
+      avatar.className = `avatar avatar-${role}`;
+      avatar.textContent = role === 'user' ? '🧑' : '📚';
+
+      const bubble = document.createElement('div');
+      bubble.className = `bubble bubble-${role}`;
+
+      const p = document.createElement('p');
+      p.textContent = text;
+      bubble.appendChild(p);
+
+      if (meta) {
+        const m = document.createElement('p');
+        m.className = 'msg-meta';
+        m.textContent = meta;
+        bubble.appendChild(m);
+      }
+
+      if (role === 'user') {
+        wrapper.appendChild(bubble);
+        wrapper.appendChild(avatar);
+      } else {
+        wrapper.appendChild(avatar);
+        wrapper.appendChild(bubble);
+      }
+
+      win.appendChild(wrapper);
+      win.scrollTop = win.scrollHeight;
+      return bubble;
+    }
+
+    function appendTyping() {
+      const win = document.getElementById('chatWindow');
+      const wrapper = document.createElement('div');
+      wrapper.className = 'msg msg-assistant';
+      wrapper.id = 'typingIndicator';
+
+      const avatar = document.createElement('div');
+      avatar.className = 'avatar avatar-assistant';
+      avatar.textContent = '📚';
+
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble bubble-assistant typing';
+      bubble.innerHTML = '<span></span><span></span><span></span>';
+
+      wrapper.appendChild(avatar);
+      wrapper.appendChild(bubble);
+      win.appendChild(wrapper);
+      win.scrollTop = win.scrollHeight;
+    }
+
+    function removeTyping() {
+      const el = document.getElementById('typingIndicator');
+      if (el) el.remove();
+    }
+
+    function appendBooks(books) {
+      if (!books || books.length === 0) return;
+      const win = document.getElementById('chatWindow');
+      const wrapper = document.createElement('div');
+      wrapper.className = 'books-grid';
+
+      books.slice(0, 6).forEach(b => {
+        const card = document.createElement('div');
+        card.className = 'book-card';
+        card.innerHTML = `
+          <div class="book-title">${escHtml(b.title)}</div>
+          <div class="book-author">${escHtml(b.author)} · ${escHtml(String(b.published_year || ''))}</div>
+          <div class="book-meta">
+            <span class="tag">${escHtml(b.category)}</span>
+            ${b.rating ? `<span class="tag tag-rating">★ ${b.rating}</span>` : ''}
+          </div>
+        `;
+        wrapper.appendChild(card);
+      });
+
+      win.appendChild(wrapper);
+      win.scrollTop = win.scrollHeight;
+    }
+
+    function escHtml(str) {
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    async function sendMessage(e) {
+      e.preventDefault();
+      const input = document.getElementById('messageInput');
+      const message = input.value.trim();
+      if (!message) return;
+
+      const mode = document.getElementById('modeSelect').value;
+      const model = getModel();
+      const btn = document.getElementById('sendBtn');
+
+      input.value = '';
+      input.style.height = 'auto';
+      btn.disabled = true;
+
+      appendMessage('user', message);
+      appendTyping();
+
+      try {
+        const res = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message, mode, model }),
+        });
+
+        removeTyping();
+
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ detail: 'Unknown error' }));
+          appendMessage('assistant', '⚠️ ' + (err.detail || 'Request failed'));
+          return;
+        }
+
+        const data = await res.json();
+        appendMessage('assistant', data.reply, `Mode: ${data.mode_used}`);
+        appendBooks(data.books);
+      } catch (err) {
+        removeTyping();
+        appendMessage('assistant', '⚠️ Network error: ' + err.message);
+      } finally {
+        btn.disabled = false;
+        input.focus();
+      }
+    }
+  </script>
+</body>
+</html>
