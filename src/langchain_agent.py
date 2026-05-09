@@ -2,6 +2,7 @@ import json
 import os
 import re
 from typing import List, Optional
+import requests
 
 from .agent import LibraryAgent
 
@@ -62,14 +63,18 @@ class LangChainLibraryAgent:
         self.llm = None
 
     def answer(self, user_query: str) -> str:
+        is_library_query = self._is_library_query(user_query)
+
         # If caller requested Ollama (free local models), do that first.
         if self.provider == "ollama":
-            return self._answer_with_ollama(user_query)
+            return self._answer_with_ollama(user_query, is_library_query=is_library_query)
 
         # If we have an OpenAI-backed LLM, use it.
         if self.llm is not None:
-            limit = self._extract_limit(user_query, default=5)
-            candidates = self.rule_agent.search_structured(user_query, limit=limit)
+            candidates: List[dict] = []
+            if is_library_query:
+                limit = self._extract_limit(user_query, default=5)
+                candidates = self.rule_agent.search_structured(user_query, limit=limit)
             prompt = self._build_prompt(user_query=user_query, candidates=candidates)
 
             resp = self.llm.invoke(prompt)
@@ -77,19 +82,19 @@ class LangChainLibraryAgent:
 
         # Auto mode: no OpenAI, so try Ollama for free.
         if self.provider == "auto":
-            return self._answer_with_ollama(user_query)
+            return self._answer_with_ollama(user_query, is_library_query=is_library_query)
 
         return self.rule_agent.answer(user_query)
 
-    def _answer_with_ollama(self, user_query: str) -> str:
+    def _answer_with_ollama(self, user_query: str, *, is_library_query: bool) -> str:
+        limit = self._extract_limit(user_query, default=5)
+        candidates = self.rule_agent.search_structured(user_query, limit=limit) if is_library_query else []
+
         try:
             from langchain_ollama import ChatOllama
         except Exception:
-            # If langchain-ollama isn't installed, fall back to deterministic answers.
-            return self.rule_agent.answer(user_query)
-
-        limit = self._extract_limit(user_query, default=5)
-        candidates = self.rule_agent.search_structured(user_query, limit=limit)
+            # If langchain-ollama isn't available, try Ollama HTTP API directly.
+            return self._answer_with_ollama_http(user_query=user_query, candidates=candidates)
 
         # Pick the best model by a simple overlap score on candidate titles.
         best_model = self.selected_ollama_model
@@ -115,6 +120,33 @@ class LangChainLibraryAgent:
         prompt = self._build_prompt(user_query=user_query, candidates=candidates)
         resp = llm.invoke(prompt)
         return resp.content if hasattr(resp, "content") else str(resp)
+
+    def _answer_with_ollama_http(self, *, user_query: str, candidates: List[dict]) -> str:
+        model = self.selected_ollama_model or (self.ollama_models[0] if self.ollama_models else "llama3.1:8b-instruct")
+        prompt = self._build_prompt(user_query=user_query, candidates=candidates)
+
+        try:
+            resp = requests.post(
+                f"{self.ollama_base_url.rstrip('/')}/api/chat",
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False,
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            message = payload.get("message", {})
+            content = message.get("content", "")
+            if content:
+                self.selected_ollama_model = model
+                return content
+        except Exception:
+            pass
+
+        # Final fallback if no LLM backend is reachable.
+        return self.rule_agent.answer(user_query)
 
     @staticmethod
     def _build_prompt(*, user_query: str, candidates: List[dict]) -> str:
@@ -178,3 +210,26 @@ class LangChainLibraryAgent:
             return default
         value = int(m.group(1))
         return max(1, min(value, 20))
+
+    @staticmethod
+    def _is_library_query(query: str) -> bool:
+        q = query.strip().lower()
+        if not q:
+            return False
+        library_terms = (
+            "book",
+            "books",
+            "author",
+            "library",
+            "borrow",
+            "borrowed",
+            "rating",
+            "novel",
+            "isbn",
+            "call number",
+            "category",
+            "title",
+            "top rated",
+            "most borrowed",
+        )
+        return any(term in q for term in library_terms)
