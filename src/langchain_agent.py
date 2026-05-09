@@ -70,15 +70,7 @@ class LangChainLibraryAgent:
         if self.llm is not None:
             limit = self._extract_limit(user_query, default=5)
             candidates = self.rule_agent.search_structured(user_query, limit=limit)
-
-            prompt = (
-                "You are a helpful AI library assistant.\n"
-                "You are given a user question and a list of candidate books from a local library database.\n"
-                "Use only the provided candidates to answer. If candidates are empty, say you found no matches.\n\n"
-                f"User question: {user_query}\n\n"
-                f"Candidates (JSON): {json.dumps(candidates, ensure_ascii=False)}\n\n"
-                "Answer:"
-            )
+            prompt = self._build_prompt(user_query=user_query, candidates=candidates)
 
             resp = self.llm.invoke(prompt)
             return resp.content if hasattr(resp, "content") else str(resp)
@@ -98,8 +90,6 @@ class LangChainLibraryAgent:
 
         limit = self._extract_limit(user_query, default=5)
         candidates = self.rule_agent.search_structured(user_query, limit=limit)
-        if not candidates:
-            return self.rule_agent.answer(user_query)
 
         # Pick the best model by a simple overlap score on candidate titles.
         best_model = self.selected_ollama_model
@@ -128,15 +118,24 @@ class LangChainLibraryAgent:
 
     @staticmethod
     def _build_prompt(*, user_query: str, candidates: List[dict]) -> str:
+        if candidates:
+            return (
+                "You are a helpful AI assistant.\n"
+                "You have library database candidates and a user question.\n"
+                "If the question is about books/library topics, prioritize these candidates.\n"
+                "For each recommended book, include the exact title from the candidate list.\n"
+                "If the question is not related to library/books, answer normally as a general assistant.\n"
+                "Keep responses concise and clear.\n\n"
+                f"User question: {user_query}\n\n"
+                f"Library candidates (JSON): {json.dumps(candidates, ensure_ascii=False)}\n\n"
+                "Answer:"
+            )
+
         return (
-            "You are a helpful AI library assistant.\n"
-            "You must use ONLY the provided candidate books; do not invent books.\n"
-            "Rules:\n"
-            "- If candidates are empty, say no matches.\n"
-            "- For each recommended book, include the EXACT title from the candidate.\n"
-            "- Keep it short and boss-friendly.\n\n"
+            "You are a helpful general AI assistant.\n"
+            "Answer the user question directly and clearly.\n"
+            "If the question needs live/real-time data, say you need a connected external data tool.\n\n"
             f"User question: {user_query}\n\n"
-            f"Candidates (JSON): {json.dumps(candidates, ensure_ascii=False)}\n\n"
             "Answer:"
         )
 
