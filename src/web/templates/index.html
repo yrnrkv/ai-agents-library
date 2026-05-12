@@ -333,8 +333,20 @@
         });
         removeTyping();
         if (!res.ok) {
-          const err = await res.json().catch(() => ({ detail: 'Unknown error' }));
-          appendMessage('assistant', '⚠️ ' + (err.detail || 'Request failed'));
+          let detail = 'Request failed';
+          try {
+            const ct = (res.headers.get('content-type') || '').toLowerCase();
+            if (ct.includes('application/json')) {
+              const err = await res.json();
+              detail = err.detail || err.message || JSON.stringify(err);
+            } else {
+              const text = (await res.text()).trim();
+              detail = text.slice(0, 280) || res.statusText || detail;
+            }
+          } catch (_) {
+            detail = res.statusText || 'Non-JSON error body';
+          }
+          appendMessage('assistant', `⚠️ ${detail} (HTTP ${res.status})`);
           return;
         }
         const data = await res.json();

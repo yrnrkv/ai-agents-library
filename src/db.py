@@ -7,13 +7,41 @@ from sqlalchemy import create_engine, text
 from .config import BUSINESS_DB_PATH, QUICK_QUERY_DB_PATH, DATA_DIR
 from .models import BaseBusiness, BaseQuickQuery
 
+# Shared engines (FastAPI runs blocking chat/catalog in thread pool workers).
+_business_engine = None
+_quick_engine = None
+
+
+def dispose_engines() -> None:
+    """Close pooled connections (call before unlinking DB files on reset)."""
+    global _business_engine, _quick_engine
+    for eng in (_business_engine, _quick_engine):
+        if eng is not None:
+            eng.dispose()
+    _business_engine = None
+    _quick_engine = None
+
 
 def get_business_engine():
-    return create_engine(f"sqlite:///{BUSINESS_DB_PATH}", future=True)
+    global _business_engine
+    if _business_engine is None:
+        _business_engine = create_engine(
+            f"sqlite:///{BUSINESS_DB_PATH}",
+            future=True,
+            connect_args={"check_same_thread": False},
+        )
+    return _business_engine
 
 
 def get_quick_query_engine():
-    return create_engine(f"sqlite:///{QUICK_QUERY_DB_PATH}", future=True)
+    global _quick_engine
+    if _quick_engine is None:
+        _quick_engine = create_engine(
+            f"sqlite:///{QUICK_QUERY_DB_PATH}",
+            future=True,
+            connect_args={"check_same_thread": False},
+        )
+    return _quick_engine
 
 
 def migrate_quick_query_schema(quick_engine) -> None:
@@ -33,6 +61,7 @@ def init_databases(reset: bool = False) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     if reset:
+        dispose_engines()
         for db_path in (BUSINESS_DB_PATH, QUICK_QUERY_DB_PATH):
             try:
                 Path(db_path).unlink(missing_ok=True)

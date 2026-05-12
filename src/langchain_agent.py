@@ -2,12 +2,35 @@ import json
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from typing import List, Optional
 
 import requests
 
 from .agent import LibraryAgent
 from .intent import user_wants_book_catalog_results
+
+
+def _invoke_llm_with_timeout(llm, prompt: str, timeout_s: float) -> str:
+    """
+    Hard wall-clock cap on llm.invoke — avoids hanging forever when the HTTP
+    client ignores shorter timeouts (important for Render/proxy limits).
+    """
+    timeout_s = max(1.0, float(timeout_s))
+
+    def _call():
+        return llm.invoke(prompt)
+
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        fut = ex.submit(_call)
+        try:
+            resp = fut.result(timeout=timeout_s)
+        except FuturesTimeout:
+            raise TimeoutError(
+                f"LLM did not finish within {timeout_s:.0f}s "
+                "(the request may have been cut off by the host or network)."
+            ) from None
+    return resp.content if hasattr(resp, "content") else str(resp)
 
 
 class LangChainLibraryAgent:
@@ -68,11 +91,18 @@ class LangChainLibraryAgent:
         try:
             from langchain_openai import ChatOpenAI
 
-            self.llm = ChatOpenAI(
+            tout = float(os.getenv("CLOUD_LLM_PER_CALL_TIMEOUT", "40"))
+            kwargs = dict(
                 model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
                 temperature=0,
                 api_key=self.openai_api_key,
+                timeout=tout,
             )
+            try:
+                self.llm = ChatOpenAI(**kwargs)
+            except TypeError:
+                kwargs.pop("timeout", None)
+                self.llm = ChatOpenAI(**kwargs)
         except Exception:
             # If LangChain/OpenAI imports fail, we fallback.
             self.llm = None
@@ -85,12 +115,19 @@ class LangChainLibraryAgent:
         try:
             from langchain_openai import ChatOpenAI
 
-            self.llm = ChatOpenAI(
+            tout = float(os.getenv("CLOUD_LLM_PER_CALL_TIMEOUT", "40"))
+            kwargs = dict(
                 model=self.groq_model,
                 temperature=0,
                 openai_api_key=self.groq_api_key,
                 openai_api_base="https://api.groq.com/openai/v1",
+                timeout=tout,
             )
+            try:
+                self.llm = ChatOpenAI(**kwargs)
+            except TypeError:
+                kwargs.pop("timeout", None)
+                self.llm = ChatOpenAI(**kwargs)
         except Exception:
             self.llm = None
 
@@ -148,19 +185,19 @@ class LangChainLibraryAgent:
         if self._uses_gemini and self.google_api_key:
             return self._invoke_gemini_with_retries_and_fallbacks(prompt)
 
-        resp = self.llm.invoke(prompt)
-        return resp.content if hasattr(resp, "content") else str(resp)
+        tout = float(os.getenv("CLOUD_LLM_PER_CALL_TIMEOUT", "40"))
+        return _invoke_llm_with_timeout(self.llm, prompt, tout)
 
     def _invoke_gemini_with_retries_and_fallbacks(self, prompt: str) -> str:
         from langchain_google_genai import ChatGoogleGenerativeAI
 
+        budget = float(os.getenv("GEMINI_TOTAL_BUDGET_SEC", "55"))
+        per_call = float(os.getenv("CLOUD_LLM_PER_CALL_TIMEOUT", "40"))
+        deadline = time.monotonic() + max(15.0, budget)
+
         preferred = [self.gemini_model]
-        fallbacks = [
-            "gemini-2.0-flash-lite",
-            "gemini-1.5-flash",
-            "gemini-1.5-pro",
-            "gemini-2.0-flash",
-        ]
+        # Short list: each extra model multiplies worst-case wait under quota errors.
+        fallbacks = ["gemini-2.0-flash-lite", "gemini-1.5-flash"]
         models: List[str] = []
         for m in preferred + fallbacks:
             if m and m not in models:
@@ -168,24 +205,33 @@ class LangChainLibraryAgent:
 
         last_err: Optional[Exception] = None
         for model_name in models:
+            if time.monotonic() >= deadline:
+                break
             llm = ChatGoogleGenerativeAI(
                 model=model_name,
                 temperature=0,
                 google_api_key=self.google_api_key,
             )
-            for attempt in range(3):
+            for attempt in range(2):
+                if time.monotonic() >= deadline:
+                    break
+                remaining = deadline - time.monotonic()
+                call_timeout = max(5.0, min(per_call, remaining - 0.5))
                 try:
-                    resp = llm.invoke(prompt)
-                    return resp.content if hasattr(resp, "content") else str(resp)
+                    return _invoke_llm_with_timeout(llm, prompt, call_timeout)
+                except TimeoutError as e:
+                    last_err = e
+                    break
                 except Exception as e:
                     last_err = e
                     err_text = str(e)
                     if "429" in err_text or "RESOURCE_EXHAUSTED" in err_text:
                         delay_m = re.search(r"retry in ([\d.]+)s", err_text, re.I)
-                        delay = min(90.0, float(delay_m.group(1)) + 1.0) if delay_m else 6.0
-                        time.sleep(delay)
+                        base = float(delay_m.group(1)) + 1.0 if delay_m else 4.0
+                        delay = min(15.0, base, max(0.0, deadline - time.monotonic() - 2.0))
+                        if delay > 0.5:
+                            time.sleep(delay)
                         continue
-                    # Non-retryable for this model — try next model
                     break
         if last_err:
             raise last_err
@@ -223,8 +269,8 @@ class LangChainLibraryAgent:
         )
 
         prompt = self._build_prompt(user_query=user_query, candidates=candidates)
-        resp = llm.invoke(prompt)
-        return resp.content if hasattr(resp, "content") else str(resp)
+        tout = float(os.getenv("OLLAMA_INVOKE_TIMEOUT", "60"))
+        return _invoke_llm_with_timeout(llm, prompt, tout)
 
     def _answer_with_ollama_http(self, *, user_query: str, candidates: List[dict]) -> str:
         model = self.selected_ollama_model or (self.ollama_models[0] if self.ollama_models else "llama3.1:8b-instruct")
@@ -286,8 +332,8 @@ class LangChainLibraryAgent:
             try:
                 llm = llm_factory(model)
                 prompt = self._build_prompt(user_query=user_query, candidates=candidates)
-                resp = llm.invoke(prompt)
-                text = resp.content if hasattr(resp, "content") else str(resp)
+                tout = float(os.getenv("OLLAMA_INVOKE_TIMEOUT", "45"))
+                text = _invoke_llm_with_timeout(llm, prompt, tout)
 
                 # Score: count how many candidate titles appear in the response.
                 score = 0
