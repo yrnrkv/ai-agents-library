@@ -17,6 +17,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import desc, or_
 from sqlalchemy.orm import Session
 
+from ..intent import user_wants_book_catalog_results
+
 # Resolve paths relative to this file so the app works regardless of cwd.
 _WEB_DIR = Path(__file__).parent
 _TEMPLATES_DIR = _WEB_DIR / "templates"
@@ -115,10 +117,10 @@ async def index(request: Request) -> HTMLResponse:
         "mixtral-8x7b-32768",
     ]
     gemini_models = [
-        os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
-        "gemini-2.0-flash-lite",
+        os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite"),
         "gemini-1.5-flash",
         "gemini-1.5-pro",
+        "gemini-2.0-flash",
     ]
     boot = {
         "groq_configured": groq_configured,
@@ -152,7 +154,7 @@ async def index(request: Request) -> HTMLResponse:
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=500)
     mode: str = Field(default="gemini")   # "gemini" | "ollama" | "groq" | "no_llm"
-    model: str = Field(default="gemini-2.0-flash")
+    model: str = Field(default="gemini-2.0-flash-lite")
 
 
 class ChatResponse(BaseModel):
@@ -195,7 +197,7 @@ async def catalog_books(
     from ..models import BookSearchIndex
 
     _ensure_dbs_ready()
-    limit = max(1, min(limit, 200))
+    limit = max(1, min(limit, 500))
     offset = max(0, offset)
 
     with _get_quick_session() as session:
@@ -287,12 +289,12 @@ async def chat(body: ChatRequest) -> ChatResponse:
     message = body.message.strip()
     mode = body.mode if body.mode in {"gemini", "ollama", "groq", "no_llm"} else "no_llm"
     _default_models = {
-        "gemini": "gemini-2.0-flash",
+        "gemini": "gemini-2.0-flash-lite",
         "ollama": "qwen2.5:7b-instruct",
         "groq": "llama-3.1-8b-instant",
         "no_llm": "n/a",
     }
-    model = body.model.strip() or _default_models.get(mode, "gemini-2.0-flash")
+    model = body.model.strip() or _default_models.get(mode, "gemini-2.0-flash-lite")
 
     try:
         _ensure_dbs_ready()
@@ -307,6 +309,7 @@ async def chat(body: ChatRequest) -> ChatResponse:
         from ..agent import LibraryAgent
 
         rule_agent = LibraryAgent(session)
+        book_cards = rule_agent.search_structured(message) if user_wants_book_catalog_results(message) else []
 
         if mode == "gemini":
             if not (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")):
@@ -317,7 +320,7 @@ async def chat(body: ChatRequest) -> ChatResponse:
                         "Create one at https://aistudio.google.com/apikey — meanwhile showing rule-based results.\n\n"
                         + reply
                     ),
-                    books=rule_agent.search_structured(message),
+                    books=book_cards,
                     mode_used="no_llm_fallback",
                 )
             try:
@@ -327,13 +330,17 @@ async def chat(body: ChatRequest) -> ChatResponse:
                 if lc_agent.llm is None:
                     raise RuntimeError("Gemini client failed to initialize (check langchain-google-genai install)")
                 reply = lc_agent.answer(message)
-                books = rule_agent.search_structured(message)
-                return ChatResponse(reply=reply, books=books, mode_used=f"gemini:{model}")
+                return ChatResponse(reply=reply, books=book_cards, mode_used=f"gemini:{model}")
             except Exception as exc:
                 reply = rule_agent.answer(message)
                 return ChatResponse(
-                    reply=f"⚠️ Gemini error ({exc}). Showing rule-based results.\n\n{reply}",
-                    books=rule_agent.search_structured(message),
+                    reply=(
+                        f"⚠️ Gemini error ({exc}). "
+                        "If you see quota (429), wait a minute or check limits at https://ai.google.dev/gemini-api/docs/rate-limits — "
+                        "showing rule-based results.\n\n"
+                        + reply
+                    ),
+                    books=book_cards,
                     mode_used="no_llm_fallback",
                 )
 
@@ -346,7 +353,7 @@ async def chat(body: ChatRequest) -> ChatResponse:
                         "Get a key at https://console.groq.com — meanwhile showing rule-based results.\n\n"
                         + reply
                     ),
-                    books=rule_agent.search_structured(message),
+                    books=book_cards,
                     mode_used="no_llm_fallback",
                 )
             try:
@@ -356,13 +363,13 @@ async def chat(body: ChatRequest) -> ChatResponse:
                 if lc_agent.llm is None:
                     raise RuntimeError("Groq client failed to initialize")
                 reply = lc_agent.answer(message)
-                books = rule_agent.search_structured(message)
+                books = book_cards
                 return ChatResponse(reply=reply, books=books, mode_used=f"groq:{model}")
             except Exception as exc:
                 reply = rule_agent.answer(message)
                 return ChatResponse(
                     reply=f"⚠️ Groq error ({exc}). Showing rule-based results.\n\n{reply}",
-                    books=rule_agent.search_structured(message),
+                    books=book_cards,
                     mode_used="no_llm_fallback",
                 )
 
@@ -375,7 +382,7 @@ async def chat(body: ChatRequest) -> ChatResponse:
                         f"⚠️ Ollama is not running at {_ollama_base_url()}. "
                         "Showing rule-based results instead.\n\n" + reply
                     ),
-                    books=rule_agent.search_structured(message),
+                    books=book_cards,
                     mode_used="no_llm_fallback",
                 )
 
@@ -388,19 +395,19 @@ async def chat(body: ChatRequest) -> ChatResponse:
                     ollama_models=[model],
                 )
                 reply = lc_agent.answer(message)
-                books = rule_agent.search_structured(message)
+                books = book_cards
                 return ChatResponse(reply=reply, books=books, mode_used=f"ollama:{model}")
             except Exception as exc:
                 reply = rule_agent.answer(message)
                 return ChatResponse(
                     reply=f"⚠️ LLM error ({exc}). Showing rule-based results.\n\n{reply}",
-                    books=rule_agent.search_structured(message),
+                    books=book_cards,
                     mode_used="no_llm_fallback",
                 )
 
         # mode == "no_llm"
         reply = rule_agent.answer(message)
-        books = rule_agent.search_structured(message)
+        books = book_cards
         return ChatResponse(reply=reply, books=books, mode_used="no_llm")
 
 

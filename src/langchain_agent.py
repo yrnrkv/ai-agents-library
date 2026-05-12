@@ -1,10 +1,13 @@
 import json
 import os
 import re
+import time
 from typing import List, Optional
+
 import requests
 
 from .agent import LibraryAgent
+from .intent import user_wants_book_catalog_results
 
 
 class LangChainLibraryAgent:
@@ -29,13 +32,15 @@ class LangChainLibraryAgent:
         self.groq_api_key = os.getenv("GROQ_API_KEY")
         self.groq_model = groq_model or os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
         self.google_api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        self.gemini_model = gemini_model or os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+        # Default to models that often have separate free-tier quotas from gemini-2.0-flash.
+        self.gemini_model = gemini_model or os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite")
 
         self.ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         self.ollama_models = ollama_models or ["qwen2.5:7b-instruct", "llama3.1:8b-instruct"]
 
         self.llm = None
         self.selected_ollama_model: Optional[str] = None
+        self._uses_gemini = False
 
         if provider == "ollama":
             self._init_ollama_if_requested()
@@ -102,6 +107,7 @@ class LangChainLibraryAgent:
                 temperature=0,
                 google_api_key=self.google_api_key,
             )
+            self._uses_gemini = True
         except Exception:
             self.llm = None
 
@@ -116,32 +122,78 @@ class LangChainLibraryAgent:
         self.llm = None
 
     def answer(self, user_query: str) -> str:
-        is_library_query = self._is_library_query(user_query)
+        wants_books = user_wants_book_catalog_results(user_query)
 
         # If caller requested Ollama (free local models), do that first.
         if self.provider == "ollama":
-            return self._answer_with_ollama(user_query, is_library_query=is_library_query)
+            return self._answer_with_ollama(user_query, wants_books=wants_books)
 
-        # If we have an OpenAI-backed LLM, use it.
+        # If we have a cloud / OpenAI-compatible LLM, use it.
         if self.llm is not None:
             candidates: List[dict] = []
-            if is_library_query:
+            if wants_books:
                 limit = self._extract_limit(user_query, default=5)
                 candidates = self.rule_agent.search_structured(user_query, limit=limit)
             prompt = self._build_prompt(user_query=user_query, candidates=candidates)
-
-            resp = self.llm.invoke(prompt)
-            return resp.content if hasattr(resp, "content") else str(resp)
+            return self._invoke_cloud_llm(prompt)
 
         # Auto mode: no OpenAI, so try Ollama for free.
         if self.provider == "auto":
-            return self._answer_with_ollama(user_query, is_library_query=is_library_query)
+            return self._answer_with_ollama(user_query, wants_books=wants_books)
 
         return self.rule_agent.answer(user_query)
 
-    def _answer_with_ollama(self, user_query: str, *, is_library_query: bool) -> str:
+    def _invoke_cloud_llm(self, prompt: str) -> str:
+        """Invoke LLM; Gemini gets retries, backoff, and model fallbacks on 429."""
+        if self._uses_gemini and self.google_api_key:
+            return self._invoke_gemini_with_retries_and_fallbacks(prompt)
+
+        resp = self.llm.invoke(prompt)
+        return resp.content if hasattr(resp, "content") else str(resp)
+
+    def _invoke_gemini_with_retries_and_fallbacks(self, prompt: str) -> str:
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        preferred = [self.gemini_model]
+        fallbacks = [
+            "gemini-2.0-flash-lite",
+            "gemini-1.5-flash",
+            "gemini-1.5-pro",
+            "gemini-2.0-flash",
+        ]
+        models: List[str] = []
+        for m in preferred + fallbacks:
+            if m and m not in models:
+                models.append(m)
+
+        last_err: Optional[Exception] = None
+        for model_name in models:
+            llm = ChatGoogleGenerativeAI(
+                model=model_name,
+                temperature=0,
+                google_api_key=self.google_api_key,
+            )
+            for attempt in range(3):
+                try:
+                    resp = llm.invoke(prompt)
+                    return resp.content if hasattr(resp, "content") else str(resp)
+                except Exception as e:
+                    last_err = e
+                    err_text = str(e)
+                    if "429" in err_text or "RESOURCE_EXHAUSTED" in err_text:
+                        delay_m = re.search(r"retry in ([\d.]+)s", err_text, re.I)
+                        delay = min(90.0, float(delay_m.group(1)) + 1.0) if delay_m else 6.0
+                        time.sleep(delay)
+                        continue
+                    # Non-retryable for this model — try next model
+                    break
+        if last_err:
+            raise last_err
+        raise RuntimeError("Gemini invocation failed with no exception detail")
+
+    def _answer_with_ollama(self, user_query: str, *, wants_books: bool) -> str:
         limit = self._extract_limit(user_query, default=5)
-        candidates = self.rule_agent.search_structured(user_query, limit=limit) if is_library_query else []
+        candidates = self.rule_agent.search_structured(user_query, limit=limit) if wants_books else []
 
         try:
             from langchain_ollama import ChatOllama
@@ -206,12 +258,10 @@ class LangChainLibraryAgent:
         if candidates:
             return (
                 "You are a helpful AI assistant.\n"
-                "You have library database candidates and a user question.\n"
-                "If the question is about books/library topics, prioritize these candidates.\n"
-                "For each recommended book from the list, include the EXACT title string and its numeric catalog id (field id).\n"
-                "Readers will match titles to the in-app catalog using that id.\n"
-                "If the question is not related to library/books, answer normally as a general assistant.\n"
-                "Keep responses concise and clear.\n\n"
+                "The user asked for book recommendations or to find books in the library.\n"
+                "Use ONLY the provided candidates; recommend from this list when appropriate.\n"
+                "For each recommended book, include the EXACT title string and its numeric catalog id (field id).\n"
+                "Keep the answer focused on these books; do not invent titles not in the JSON.\n\n"
                 f"User question: {user_query}\n\n"
                 f"Library candidates (JSON): {json.dumps(candidates, ensure_ascii=False)}\n\n"
                 "Answer:"
@@ -219,7 +269,8 @@ class LangChainLibraryAgent:
 
         return (
             "You are a helpful general AI assistant.\n"
-            "Answer the user question directly and clearly.\n"
+            "The user did NOT ask for book recommendations or a library search — answer their question directly.\n"
+            "Do not suggest books or a reading list unless they clearly ask for books in this same message.\n"
             "If the question needs live/real-time data, say you need a connected external data tool.\n\n"
             f"User question: {user_query}\n\n"
             "Answer:"
@@ -264,26 +315,3 @@ class LangChainLibraryAgent:
             return default
         value = int(m.group(1))
         return max(1, min(value, 20))
-
-    @staticmethod
-    def _is_library_query(query: str) -> bool:
-        q = query.strip().lower()
-        if not q:
-            return False
-        library_terms = (
-            "book",
-            "books",
-            "author",
-            "library",
-            "borrow",
-            "borrowed",
-            "rating",
-            "novel",
-            "isbn",
-            "call number",
-            "category",
-            "title",
-            "top rated",
-            "most borrowed",
-        )
-        return any(term in q for term in library_terms)

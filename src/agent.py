@@ -5,6 +5,7 @@ from typing import List, Optional
 from sqlalchemy import desc, or_
 from sqlalchemy.orm import Session
 
+from .intent import user_wants_book_catalog_results
 from .models import BookSearchIndex
 
 
@@ -13,12 +14,18 @@ class LibraryAgent:
         self.quick_query_session = quick_query_session
 
     def answer(self, user_query: str) -> str:
-        q = user_query.strip().lower()
+        raw = user_query.strip()
+        if not raw:
+            return "Please ask a question."
 
-        if not q:
-            return "Please ask a library question."
+        if not user_wants_book_catalog_results(user_query):
+            return (
+                "Rule-based mode only searches the catalog when you ask for books "
+                "(for example: recommend books about Python, find books on machine learning). "
+                "For general questions, choose Gemini or Ollama in the sidebar."
+            )
 
-        limit = self._extract_limit(q, default=5)
+        q = raw.lower()
 
         if "top rated" in q or "best rated" in q:
             books = (
@@ -91,6 +98,9 @@ class LibraryAgent:
         """
         For LangChain integration: return structured candidates for the LLM to summarize.
         """
+        if not user_wants_book_catalog_results(user_query):
+            return []
+
         q = user_query.strip().lower()
         if not q:
             return []

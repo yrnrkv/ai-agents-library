@@ -424,7 +424,11 @@ body {
 }
 .catalog-search { flex: 2; min-width: 160px; }
 .catalog-source { flex: 1; min-width: 120px; }
-.catalog-meta { font-size: .8rem; color: var(--text-muted); margin-bottom: .75rem; }
+.catalog-load-more-wrap {
+  text-align: center;
+  margin-top: 1rem;
+  padding-bottom: 0.5rem;
+}
 .catalog-loading { color: var(--text-muted); padding: 1rem; }
 
 .catalog-grid {

@@ -77,7 +77,7 @@
             <div class="msg msg-assistant">
               <div class="avatar avatar-assistant">📚</div>
               <div class="bubble bubble-assistant">
-                <p>Ask anything — general questions use the LLM; library questions use our merged catalog (HK Reading City, HKPL, Joint Publishing, Open Library, and more).</p>
+                <p>Ask anything in <strong>Gemini</strong> mode for general answers. Book cards and catalog search appear only when you ask for books (e.g. recommend…, find books about…).</p>
                 <p class="msg-meta">Tip: open <strong>Library catalog</strong> to browse covers and source links.</p>
               </div>
             </div>
@@ -102,6 +102,9 @@
         </div>
         <p class="catalog-meta" id="catalogMeta"></p>
         <div class="catalog-grid" id="catalogGrid"></div>
+        <div class="catalog-load-more-wrap" id="catalogLoadMoreWrap" hidden>
+          <button type="button" class="btn-secondary" id="catalogLoadMore">Load more</button>
+        </div>
       </section>
     </div>
   </main>
@@ -183,7 +186,7 @@
         document.getElementById('panel-catalog').classList.toggle('panel-active', tab === 'catalog');
         document.getElementById('panel-chat').toggleAttribute('hidden', tab !== 'chat');
         document.getElementById('panel-catalog').toggleAttribute('hidden', tab !== 'catalog');
-        if (tab === 'catalog') loadCatalog();
+        if (tab === 'catalog') loadCatalog(true);
       });
     });
 
@@ -347,49 +350,81 @@
     }
 
     /* Catalog */
-    async function loadCatalog() {
+    let catalogOffset = 0;
+    const catalogPageSize = 100;
+
+    function appendCatalogCards(books) {
+      const grid = document.getElementById('catalogGrid');
+      books.forEach(b => {
+        const art = document.createElement('article');
+        art.className = 'library-card';
+        const imgUrl = b.cover_image_url;
+        const cover = imgUrl
+          ? `<img class="library-cover" src="${escHtml(imgUrl)}" alt="" loading="lazy" />`
+          : `<div class="library-cover-ph">${escHtml((b.title || '?').slice(0, 1))}</div>`;
+        const tags = (b.sources || []).map(s => `<span class="tag tag-src">${escHtml(s.name)}</span>`).join('');
+        art.innerHTML = `
+          ${cover}
+          <div class="library-card-body">
+            <h3 class="library-card-title">${escHtml(b.title)}</h3>
+            <p class="library-card-author">${escHtml(b.author)}</p>
+            <div class="library-card-meta">${tags}</div>
+            <button type="button" class="btn-secondary btn-small" data-open="${b.id}">Details</button>
+          </div>`;
+        grid.appendChild(art);
+      });
+    }
+
+    document.getElementById('catalogGrid').addEventListener('click', e => {
+      const btn = e.target.closest('[data-open]');
+      if (btn) openBookModal(parseInt(btn.getAttribute('data-open'), 10));
+    });
+
+    async function loadCatalog(reset) {
       const q = document.getElementById('catalogSearch').value.trim();
       const source = document.getElementById('catalogSource').value.trim();
       const grid = document.getElementById('catalogGrid');
       const meta = document.getElementById('catalogMeta');
-      grid.innerHTML = '<p class="catalog-loading">Loading…</p>';
-      const params = new URLSearchParams({ limit: '48', offset: '0' });
+      const wrap = document.getElementById('catalogLoadMoreWrap');
+      const loadBtn = document.getElementById('catalogLoadMore');
+
+      if (reset) {
+        catalogOffset = 0;
+        grid.innerHTML = '<p class="catalog-loading">Loading…</p>';
+      } else {
+        loadBtn.disabled = true;
+      }
+
+      const params = new URLSearchParams({
+        limit: String(catalogPageSize),
+        offset: String(catalogOffset),
+      });
       if (q) params.set('q', q);
       if (source) params.set('source', source);
+
       try {
         const res = await fetch('/api/catalog/books?' + params.toString());
         const data = await res.json();
-        meta.textContent = `${data.total} books`;
-        grid.innerHTML = '';
-        data.books.forEach(b => {
-          const art = document.createElement('article');
-          art.className = 'library-card';
-          const imgUrl = b.cover_image_url;
-          const cover = imgUrl
-            ? `<img class="library-cover" src="${escHtml(imgUrl)}" alt="" loading="lazy" />`
-            : `<div class="library-cover-ph">${escHtml((b.title || '?').slice(0, 1))}</div>`;
-          const tags = (b.sources || []).map(s => `<span class="tag tag-src">${escHtml(s.name)}</span>`).join('');
-          art.innerHTML = `
-            ${cover}
-            <div class="library-card-body">
-              <h3 class="library-card-title">${escHtml(b.title)}</h3>
-              <p class="library-card-author">${escHtml(b.author)}</p>
-              <div class="library-card-meta">${tags}</div>
-              <button type="button" class="btn-secondary btn-small" data-open="${b.id}">Details</button>
-            </div>`;
-          grid.appendChild(art);
-        });
-        grid.querySelectorAll('[data-open]').forEach(btn => {
-          btn.addEventListener('click', () => openBookModal(parseInt(btn.getAttribute('data-open'), 10)));
-        });
+        if (reset) {
+          grid.innerHTML = '';
+        } else {
+          grid.querySelector('.catalog-loading')?.remove();
+        }
+        appendCatalogCards(data.books);
+        catalogOffset += data.books.length;
+        meta.textContent = `Showing ${catalogOffset} of ${data.total} books`;
+        wrap.hidden = catalogOffset >= data.total || data.books.length === 0;
+        loadBtn.disabled = false;
       } catch (e) {
-        grid.innerHTML = '<p class="catalog-loading">Failed to load catalog.</p>';
+        if (reset) grid.innerHTML = '<p class="catalog-loading">Failed to load catalog.</p>';
+        loadBtn.disabled = false;
       }
     }
 
-    document.getElementById('catalogReload').addEventListener('click', loadCatalog);
+    document.getElementById('catalogReload').addEventListener('click', () => loadCatalog(true));
+    document.getElementById('catalogLoadMore').addEventListener('click', () => loadCatalog(false));
     document.getElementById('catalogSearch').addEventListener('keydown', e => {
-      if (e.key === 'Enter') { e.preventDefault(); loadCatalog(); }
+      if (e.key === 'Enter') { e.preventDefault(); loadCatalog(true); }
     });
 
     async function openBookModal(id) {
