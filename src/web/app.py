@@ -1,6 +1,7 @@
 """FastAPI web application for AI Library Agent."""
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 
@@ -197,17 +198,7 @@ class CatalogResponse(BaseModel):
     books: List[CatalogBook]
 
 
-# ---------------------------------------------------------------------------
-# API endpoints
-# ---------------------------------------------------------------------------
-
-@app.get("/api/catalog/books", response_model=CatalogResponse)
-async def catalog_books(
-    q: str = "",
-    source: str = "",
-    limit: int = 48,
-    offset: int = 0,
-) -> CatalogResponse:
+def _catalog_books_sync(q: str, source: str, limit: int, offset: int) -> CatalogResponse:
     from ..models import BookSearchIndex
 
     _ensure_dbs_ready()
@@ -262,8 +253,7 @@ async def catalog_books(
     return CatalogResponse(total=total, offset=offset, limit=limit, books=books)
 
 
-@app.get("/api/catalog/books/{business_book_id}", response_model=CatalogBook)
-async def catalog_book_detail(business_book_id: int) -> CatalogBook:
+def _catalog_book_detail_sync(business_book_id: int) -> CatalogBook:
     from ..models import BookSearchIndex
 
     _ensure_dbs_ready()
@@ -298,8 +288,8 @@ async def catalog_book_detail(business_book_id: int) -> CatalogBook:
         )
 
 
-@app.post("/api/chat", response_model=ChatResponse)
-async def chat(body: ChatRequest) -> ChatResponse:
+def _chat_sync(body: ChatRequest) -> ChatResponse:
+    """Blocking LLM + DB work; run via asyncio.to_thread so health checks stay responsive."""
     message = body.message.strip()
     mode = body.mode if body.mode in {"gemini", "ollama", "groq", "no_llm"} else "no_llm"
     _default_models = {
@@ -309,15 +299,6 @@ async def chat(body: ChatRequest) -> ChatResponse:
         "no_llm": "n/a",
     }
     model = body.model.strip() or _default_models.get(mode, "gemini-2.0-flash-lite")
-
-    try:
-        _ensure_dbs_ready()
-    except Exception as exc:
-        return ChatResponse(
-            reply=f"Database error: {exc}. Run `python -m src.main --init --reset-db --seed-sample --sync` to initialize.",
-            books=[],
-            mode_used="error",
-        )
 
     with _get_quick_session() as session:
         from ..agent import LibraryAgent
@@ -377,8 +358,7 @@ async def chat(body: ChatRequest) -> ChatResponse:
                 if lc_agent.llm is None:
                     raise RuntimeError("Groq client failed to initialize")
                 reply = lc_agent.answer(message)
-                books = book_cards
-                return ChatResponse(reply=reply, books=books, mode_used=f"groq:{model}")
+                return ChatResponse(reply=reply, books=book_cards, mode_used=f"groq:{model}")
             except Exception as exc:
                 reply = rule_agent.answer(message)
                 return ChatResponse(
@@ -389,7 +369,6 @@ async def chat(body: ChatRequest) -> ChatResponse:
 
         if mode == "ollama":
             if not _is_ollama_reachable():
-                # Graceful fallback to rule-based agent with explanation.
                 reply = rule_agent.answer(message)
                 return ChatResponse(
                     reply=(
@@ -409,8 +388,7 @@ async def chat(body: ChatRequest) -> ChatResponse:
                     ollama_models=[model],
                 )
                 reply = lc_agent.answer(message)
-                books = book_cards
-                return ChatResponse(reply=reply, books=books, mode_used=f"ollama:{model}")
+                return ChatResponse(reply=reply, books=book_cards, mode_used=f"ollama:{model}")
             except Exception as exc:
                 reply = rule_agent.answer(message)
                 return ChatResponse(
@@ -419,10 +397,40 @@ async def chat(body: ChatRequest) -> ChatResponse:
                     mode_used="no_llm_fallback",
                 )
 
-        # mode == "no_llm"
         reply = rule_agent.answer(message)
-        books = book_cards
-        return ChatResponse(reply=reply, books=books, mode_used="no_llm")
+        return ChatResponse(reply=reply, books=book_cards, mode_used="no_llm")
+
+
+# ---------------------------------------------------------------------------
+# API endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/catalog/books", response_model=CatalogResponse)
+async def catalog_books(
+    q: str = "",
+    source: str = "",
+    limit: int = 48,
+    offset: int = 0,
+) -> CatalogResponse:
+    return await asyncio.to_thread(_catalog_books_sync, q, source, limit, offset)
+
+
+@app.get("/api/catalog/books/{business_book_id}", response_model=CatalogBook)
+async def catalog_book_detail(business_book_id: int) -> CatalogBook:
+    return await asyncio.to_thread(_catalog_book_detail_sync, business_book_id)
+
+
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat(body: ChatRequest) -> ChatResponse:
+    try:
+        await asyncio.to_thread(_ensure_dbs_ready)
+    except Exception as exc:
+        return ChatResponse(
+            reply=f"Database error: {exc}. Run `python -m src.main --init --reset-db --seed-sample --sync` to initialize.",
+            books=[],
+            mode_used="error",
+        )
+    return await asyncio.to_thread(_chat_sync, body)
 
 
 @app.get("/api/health")
