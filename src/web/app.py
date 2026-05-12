@@ -36,7 +36,7 @@ templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 def _ensure_dbs_ready() -> None:
     """Auto-initialize and seed DBs if they are missing or empty."""
     from ..db import get_business_engine, get_quick_query_engine, init_databases
-    from ..models import BookSearchIndex
+    from ..models import Book, BookSearchIndex
     from ..seed_sample_data import seed_business_sample_data
     from ..sync import sync_business_to_quick_query
 
@@ -46,10 +46,13 @@ def _ensure_dbs_ready() -> None:
     quick_engine = get_quick_query_engine()
 
     with Session(business_engine) as biz_sess, Session(quick_engine) as quick_sess:
-        # If Quick Query DB is empty, seed sample data and sync.
-        count = quick_sess.query(BookSearchIndex).count()
-        if count == 0:
+        # Keep quick-query index in sync with business DB row count.
+        quick_count = quick_sess.query(BookSearchIndex).count()
+        business_count = biz_sess.query(Book).count()
+        if business_count == 0:
             seed_business_sample_data(biz_sess)
+            business_count = biz_sess.query(Book).count()
+        if quick_count != business_count:
             sync_business_to_quick_query(biz_sess, quick_sess)
 
 
@@ -436,17 +439,31 @@ async def chat(body: ChatRequest) -> ChatResponse:
 @app.get("/api/health")
 async def health() -> JSONResponse:
     from ..config import BUSINESS_DB_PATH, QUICK_QUERY_DB_PATH
+    from ..models import Book, BookSearchIndex
 
     biz_exists = Path(BUSINESS_DB_PATH).exists()
     qq_exists = Path(QUICK_QUERY_DB_PATH).exists()
     status = "ok" if (biz_exists and qq_exists) else "degraded"
     ollama_ok = _is_ollama_reachable()
     ollama_models = _list_ollama_models()
+    business_count = 0
+    quick_count = 0
+    if biz_exists and qq_exists:
+        try:
+            from ..db import get_business_engine, get_quick_query_engine
+
+            with Session(get_business_engine()) as biz_sess, Session(get_quick_query_engine()) as quick_sess:
+                business_count = biz_sess.query(Book).count()
+                quick_count = quick_sess.query(BookSearchIndex).count()
+        except Exception:
+            pass
     return JSONResponse(
         {
             "status": status,
             "business_db": biz_exists,
             "quick_query_db": qq_exists,
+            "business_books": business_count,
+            "quick_index_books": quick_count,
             "ollama_reachable": ollama_ok,
             "ollama_probe_skipped": _ollama_probes_disabled(),
             "ollama_models": ollama_models,

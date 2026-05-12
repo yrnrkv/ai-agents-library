@@ -11,6 +11,21 @@ from .agent import LibraryAgent
 from .intent import user_wants_book_catalog_results
 
 
+def _env_float(name: str, default: float, *, min_value: Optional[float] = None, max_value: Optional[float] = None) -> float:
+    value = default
+    raw = os.getenv(name, "")
+    if raw.strip():
+        try:
+            value = float(raw)
+        except ValueError:
+            value = default
+    if min_value is not None:
+        value = max(min_value, value)
+    if max_value is not None:
+        value = min(max_value, value)
+    return value
+
+
 def _invoke_llm_with_timeout(llm, prompt: str, timeout_s: float) -> str:
     """
     Hard wall-clock cap on llm.invoke — avoids hanging forever when the HTTP
@@ -21,15 +36,19 @@ def _invoke_llm_with_timeout(llm, prompt: str, timeout_s: float) -> str:
     def _call():
         return llm.invoke(prompt)
 
-    with ThreadPoolExecutor(max_workers=1) as ex:
-        fut = ex.submit(_call)
-        try:
-            resp = fut.result(timeout=timeout_s)
-        except FuturesTimeout:
-            raise TimeoutError(
-                f"LLM did not finish within {timeout_s:.0f}s "
-                "(the request may have been cut off by the host or network)."
-            ) from None
+    ex = ThreadPoolExecutor(max_workers=1)
+    fut = ex.submit(_call)
+    try:
+        resp = fut.result(timeout=timeout_s)
+    except FuturesTimeout:
+        fut.cancel()
+        raise TimeoutError(
+            f"LLM did not finish within {timeout_s:.0f}s "
+            "(the request may have been cut off by the host or network)."
+        ) from None
+    finally:
+        # Do not wait for long-running LLM calls after timeout.
+        ex.shutdown(wait=False, cancel_futures=True)
     return resp.content if hasattr(resp, "content") else str(resp)
 
 
@@ -91,7 +110,7 @@ class LangChainLibraryAgent:
         try:
             from langchain_openai import ChatOpenAI
 
-            tout = float(os.getenv("CLOUD_LLM_PER_CALL_TIMEOUT", "40"))
+            tout = _env_float("CLOUD_LLM_PER_CALL_TIMEOUT", 40.0, min_value=10.0, max_value=120.0)
             kwargs = dict(
                 model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
                 temperature=0,
@@ -115,7 +134,7 @@ class LangChainLibraryAgent:
         try:
             from langchain_openai import ChatOpenAI
 
-            tout = float(os.getenv("CLOUD_LLM_PER_CALL_TIMEOUT", "40"))
+            tout = _env_float("CLOUD_LLM_PER_CALL_TIMEOUT", 40.0, min_value=10.0, max_value=120.0)
             kwargs = dict(
                 model=self.groq_model,
                 temperature=0,
@@ -185,14 +204,15 @@ class LangChainLibraryAgent:
         if self._uses_gemini and self.google_api_key:
             return self._invoke_gemini_with_retries_and_fallbacks(prompt)
 
-        tout = float(os.getenv("CLOUD_LLM_PER_CALL_TIMEOUT", "40"))
+        tout = _env_float("CLOUD_LLM_PER_CALL_TIMEOUT", 40.0, min_value=10.0, max_value=120.0)
         return _invoke_llm_with_timeout(self.llm, prompt, tout)
 
     def _invoke_gemini_with_retries_and_fallbacks(self, prompt: str) -> str:
         from langchain_google_genai import ChatGoogleGenerativeAI
 
-        budget = float(os.getenv("GEMINI_TOTAL_BUDGET_SEC", "55"))
-        per_call = float(os.getenv("CLOUD_LLM_PER_CALL_TIMEOUT", "40"))
+        budget = _env_float("GEMINI_TOTAL_BUDGET_SEC", 55.0, min_value=20.0, max_value=180.0)
+        per_call = _env_float("CLOUD_LLM_PER_CALL_TIMEOUT", 40.0, min_value=10.0, max_value=120.0)
+        min_call = _env_float("GEMINI_MIN_CALL_TIMEOUT", 20.0, min_value=8.0, max_value=60.0)
         deadline = time.monotonic() + max(15.0, budget)
 
         preferred = [self.gemini_model]
@@ -216,7 +236,9 @@ class LangChainLibraryAgent:
                 if time.monotonic() >= deadline:
                     break
                 remaining = deadline - time.monotonic()
-                call_timeout = max(5.0, min(per_call, remaining - 0.5))
+                usable = max(4.0, remaining - 0.5)
+                target = max(min_call, per_call)
+                call_timeout = min(usable, target)
                 try:
                     return _invoke_llm_with_timeout(llm, prompt, call_timeout)
                 except TimeoutError as e:
@@ -269,7 +291,7 @@ class LangChainLibraryAgent:
         )
 
         prompt = self._build_prompt(user_query=user_query, candidates=candidates)
-        tout = float(os.getenv("OLLAMA_INVOKE_TIMEOUT", "60"))
+        tout = _env_float("OLLAMA_INVOKE_TIMEOUT", 60.0, min_value=10.0, max_value=180.0)
         return _invoke_llm_with_timeout(llm, prompt, tout)
 
     def _answer_with_ollama_http(self, *, user_query: str, candidates: List[dict]) -> str:
@@ -332,7 +354,7 @@ class LangChainLibraryAgent:
             try:
                 llm = llm_factory(model)
                 prompt = self._build_prompt(user_query=user_query, candidates=candidates)
-                tout = float(os.getenv("OLLAMA_INVOKE_TIMEOUT", "45"))
+                tout = _env_float("OLLAMA_INVOKE_TIMEOUT", 45.0, min_value=8.0, max_value=120.0)
                 text = _invoke_llm_with_timeout(llm, prompt, tout)
 
                 # Score: count how many candidate titles appear in the response.
