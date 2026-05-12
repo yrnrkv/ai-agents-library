@@ -10,7 +10,7 @@ from typing import List, Optional
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
@@ -59,13 +59,25 @@ def _get_quick_session():
     return Session(engine)
 
 
+def _ollama_probes_disabled() -> bool:
+    """
+    On Render (and similar PaaS), nothing listens on localhost:11434 — each probe
+    waits for TCP timeout and slows health checks until the platform returns 503.
+    """
+    if os.getenv("RENDER", "").lower() in ("true", "1", "yes"):
+        return True
+    return os.getenv("SKIP_OLLAMA_PROBE", "").lower() in ("1", "true", "yes")
+
+
 def _ollama_base_url() -> str:
     return os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
 
 def _is_ollama_reachable() -> bool:
+    if _ollama_probes_disabled():
+        return False
     try:
-        resp = httpx.get(_ollama_base_url(), timeout=2.0)
+        resp = httpx.get(_ollama_base_url(), timeout=0.5)
         return resp.status_code < 500
     except Exception:
         return False
@@ -73,8 +85,10 @@ def _is_ollama_reachable() -> bool:
 
 def _list_ollama_models() -> List[str]:
     """Return list of locally available Ollama model names."""
+    if _ollama_probes_disabled():
+        return []
     try:
-        resp = httpx.get(f"{_ollama_base_url()}/api/tags", timeout=3.0)
+        resp = httpx.get(f"{_ollama_base_url()}/api/tags", timeout=0.6)
         if resp.status_code == 200:
             data = resp.json()
             return [m["name"] for m in data.get("models", [])]
@@ -417,16 +431,16 @@ async def health() -> JSONResponse:
 
     biz_exists = Path(BUSINESS_DB_PATH).exists()
     qq_exists = Path(QUICK_QUERY_DB_PATH).exists()
+    status = "ok" if (biz_exists and qq_exists) else "degraded"
     ollama_ok = _is_ollama_reachable()
     ollama_models = _list_ollama_models()
-
-    status = "ok" if (biz_exists and qq_exists) else "degraded"
     return JSONResponse(
         {
             "status": status,
             "business_db": biz_exists,
             "quick_query_db": qq_exists,
             "ollama_reachable": ollama_ok,
+            "ollama_probe_skipped": _ollama_probes_disabled(),
             "ollama_models": ollama_models,
             "ollama_url": _ollama_base_url(),
             "groq_configured": bool(os.getenv("GROQ_API_KEY")),
@@ -434,3 +448,14 @@ async def health() -> JSONResponse:
             "openai_configured": bool(os.getenv("OPENAI_API_KEY")),
         }
     )
+
+
+@app.head("/api/health")
+async def health_head() -> Response:
+    """Render and other load balancers often use HEAD; GET-only routes return 405."""
+    return Response(status_code=200)
+
+
+@app.head("/")
+async def index_head() -> Response:
+    return Response(status_code=200)
