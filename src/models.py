@@ -86,6 +86,11 @@ class BookSearchIndex(BaseQuickQuery):
 
     searchable_text = Column(Text, nullable=False)
 
+    # Unified catalog: provenance + optional cover / outbound link (added via migration on older DBs).
+    sources_json = Column(Text, nullable=True)
+    primary_source_url = Column(String(1000), nullable=True)
+    cover_image_url = Column(String(1000), nullable=True)
+
 
 class AuthorSearchIndex(BaseQuickQuery):
     __tablename__ = "author_search_index"

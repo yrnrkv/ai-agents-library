@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
 from .config import BUSINESS_DB_PATH, QUICK_QUERY_DB_PATH, DATA_DIR
 from .models import BaseBusiness, BaseQuickQuery
@@ -14,6 +14,19 @@ def get_business_engine():
 
 def get_quick_query_engine():
     return create_engine(f"sqlite:///{QUICK_QUERY_DB_PATH}", future=True)
+
+
+def migrate_quick_query_schema(quick_engine) -> None:
+    """SQLite: add columns introduced after first deploy."""
+    with quick_engine.begin() as conn:
+        rows = conn.execute(text("PRAGMA table_info(book_search_index)")).fetchall()
+        cols = {r[1] for r in rows}
+        if "sources_json" not in cols:
+            conn.execute(text("ALTER TABLE book_search_index ADD COLUMN sources_json TEXT"))
+        if "primary_source_url" not in cols:
+            conn.execute(text("ALTER TABLE book_search_index ADD COLUMN primary_source_url VARCHAR(1000)"))
+        if "cover_image_url" not in cols:
+            conn.execute(text("ALTER TABLE book_search_index ADD COLUMN cover_image_url VARCHAR(1000)"))
 
 
 def init_databases(reset: bool = False) -> None:
@@ -32,3 +45,4 @@ def init_databases(reset: bool = False) -> None:
 
     BaseBusiness.metadata.create_all(business_engine)
     BaseQuickQuery.metadata.create_all(quick_query_engine)
+    migrate_quick_query_schema(quick_query_engine)

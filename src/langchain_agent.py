@@ -20,10 +20,16 @@ class LangChainLibraryAgent:
         quick_query_session,
         provider: str = "auto",
         ollama_models: Optional[List[str]] = None,
+        groq_model: Optional[str] = None,
+        gemini_model: Optional[str] = None,
     ):
         self.rule_agent = LibraryAgent(quick_query_session)
         self.provider = provider
         self.openai_api_key = os.getenv("OPENAI_API_KEY")
+        self.groq_api_key = os.getenv("GROQ_API_KEY")
+        self.groq_model = groq_model or os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+        self.google_api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        self.gemini_model = gemini_model or os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
         self.ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         self.ollama_models = ollama_models or ["qwen2.5:7b-instruct", "llama3.1:8b-instruct"]
@@ -31,8 +37,22 @@ class LangChainLibraryAgent:
         self.llm = None
         self.selected_ollama_model: Optional[str] = None
 
-        self._init_openai()
-        self._init_ollama_if_requested()
+        if provider == "ollama":
+            self._init_ollama_if_requested()
+        elif provider == "groq":
+            self._init_groq()
+        elif provider == "gemini":
+            self._init_gemini()
+        elif provider == "openai":
+            self._init_openai()
+        else:  # auto — prefer Gemini (works well in HK), then Groq, then OpenAI
+            if self.google_api_key:
+                self._init_gemini()
+            elif self.groq_api_key:
+                self._init_groq()
+            elif self.openai_api_key:
+                self._init_openai()
+            self._init_ollama_if_requested()
 
     def _init_openai(self) -> None:
         if self.provider not in {"auto", "openai"}:
@@ -52,9 +72,42 @@ class LangChainLibraryAgent:
             # If LangChain/OpenAI imports fail, we fallback.
             self.llm = None
 
+    def _init_groq(self) -> None:
+        if self.provider not in {"auto", "groq"}:
+            return
+        if not self.groq_api_key:
+            return
+        try:
+            from langchain_openai import ChatOpenAI
+
+            self.llm = ChatOpenAI(
+                model=self.groq_model,
+                temperature=0,
+                openai_api_key=self.groq_api_key,
+                openai_api_base="https://api.groq.com/openai/v1",
+            )
+        except Exception:
+            self.llm = None
+
+    def _init_gemini(self) -> None:
+        if self.provider not in {"auto", "gemini"}:
+            return
+        if not self.google_api_key:
+            return
+        try:
+            from langchain_google_genai import ChatGoogleGenerativeAI
+
+            self.llm = ChatGoogleGenerativeAI(
+                model=self.gemini_model,
+                temperature=0,
+                google_api_key=self.google_api_key,
+            )
+        except Exception:
+            self.llm = None
+
     def _init_ollama_if_requested(self) -> None:
         if self.llm is not None:
-            return  # OpenAI selected.
+            return  # Cloud LLM already selected.
 
         if self.provider not in {"auto", "ollama"}:
             return
@@ -155,7 +208,8 @@ class LangChainLibraryAgent:
                 "You are a helpful AI assistant.\n"
                 "You have library database candidates and a user question.\n"
                 "If the question is about books/library topics, prioritize these candidates.\n"
-                "For each recommended book, include the exact title from the candidate list.\n"
+                "For each recommended book from the list, include the EXACT title string and its numeric catalog id (field id).\n"
+                "Readers will match titles to the in-app catalog using that id.\n"
                 "If the question is not related to library/books, answer normally as a general assistant.\n"
                 "Keep responses concise and clear.\n\n"
                 f"User question: {user_query}\n\n"

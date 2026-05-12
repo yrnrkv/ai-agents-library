@@ -1,3 +1,4 @@
+import json
 import re
 from typing import List, Optional
 
@@ -134,8 +135,15 @@ class LibraryAgent:
 
         results: List[dict] = []
         for b in books:
+            sources: List[dict] = []
+            if getattr(b, "sources_json", None):
+                try:
+                    sources = json.loads(b.sources_json)  # type: ignore[arg-type]
+                except json.JSONDecodeError:
+                    sources = []
             results.append(
                 {
+                    "id": b.business_book_id,
                     "title": b.title,
                     "author": b.author_name,
                     "category": b.category_name,
@@ -143,6 +151,9 @@ class LibraryAgent:
                     "rating": b.rating,
                     "loans_count": b.loans_count,
                     "call_number": b.call_number,
+                    "sources": sources,
+                    "primary_source_url": getattr(b, "primary_source_url", None),
+                    "cover_image_url": getattr(b, "cover_image_url", None),
                 }
             )
         return results
