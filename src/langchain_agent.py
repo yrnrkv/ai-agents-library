@@ -3,6 +3,7 @@ import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+from functools import lru_cache
 from typing import List, Optional
 
 import requests
@@ -24,6 +25,41 @@ def _env_float(name: str, default: float, *, min_value: Optional[float] = None, 
     if max_value is not None:
         value = min(max_value, value)
     return value
+
+
+@lru_cache(maxsize=2)
+def _list_available_gemini_models(api_key: str) -> List[str]:
+    """Fetch Gemini chat-capable models for this API key."""
+    if not api_key:
+        return []
+    try:
+        resp = requests.get(
+            "https://generativelanguage.googleapis.com/v1beta/models",
+            params={"key": api_key},
+            timeout=8,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception:
+        return []
+
+    models: List[str] = []
+    for item in payload.get("models", []):
+        methods = item.get("supportedGenerationMethods") or []
+        if "generateContent" not in methods:
+            continue
+        name = str(item.get("name", ""))
+        if name.startswith("models/"):
+            name = name.split("/", 1)[1]
+        lowered = name.lower()
+        if not lowered.startswith("gemini-"):
+            continue
+        # Ignore embeddings/image-only entries.
+        if not any(tag in lowered for tag in ("flash", "pro")):
+            continue
+        if name not in models:
+            models.append(name)
+    return models
 
 
 def _invoke_llm_with_timeout(llm, prompt: str, timeout_s: float) -> str:
@@ -215,13 +251,27 @@ class LangChainLibraryAgent:
         min_call = _env_float("GEMINI_MIN_CALL_TIMEOUT", 20.0, min_value=8.0, max_value=60.0)
         deadline = time.monotonic() + max(15.0, budget)
 
-        preferred = [self.gemini_model]
-        # Short list: each extra model multiplies worst-case wait under quota errors.
-        fallbacks = ["gemini-2.0-flash-lite", "gemini-1.5-flash"]
+        preferred = [self.gemini_model] if self.gemini_model else []
+        # Newer family first; old 1.5 models often return NOT_FOUND on newer keys.
+        fallbacks = [
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+            "gemini-2.0-flash-lite",
+            "gemini-2.0-flash",
+        ]
+        discovered = _list_available_gemini_models(self.google_api_key)
         models: List[str] = []
-        for m in preferred + fallbacks:
-            if m and m not in models:
-                models.append(m)
+        if discovered:
+            for m in preferred + fallbacks:
+                if m in discovered and m not in models:
+                    models.append(m)
+            for m in discovered:
+                if m not in models:
+                    models.append(m)
+        else:
+            for m in preferred + fallbacks:
+                if m and m not in models:
+                    models.append(m)
 
         last_err: Optional[Exception] = None
         for model_name in models:

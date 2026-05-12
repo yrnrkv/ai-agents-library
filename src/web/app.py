@@ -46,13 +46,14 @@ def _ensure_dbs_ready() -> None:
     quick_engine = get_quick_query_engine()
 
     with Session(business_engine) as biz_sess, Session(quick_engine) as quick_sess:
-        # Keep quick-query index in sync with business DB row count.
+        # Keep quick index in sync without overwriting a richer existing quick DB.
         quick_count = quick_sess.query(BookSearchIndex).count()
         business_count = biz_sess.query(Book).count()
-        if business_count == 0:
+        if business_count == 0 and quick_count == 0:
             seed_business_sample_data(biz_sess)
             business_count = biz_sess.query(Book).count()
-        if quick_count != business_count:
+        # Business DB is the source of truth only when it has at least as many rows.
+        if business_count > 0 and quick_count < business_count:
             sync_business_to_quick_query(biz_sess, quick_sess)
 
 
@@ -136,8 +137,9 @@ async def index(request: Request) -> HTMLResponse:
     ]
     gemini_models = [
         os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite"),
-        "gemini-1.5-flash",
-        "gemini-1.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.0-flash-lite",
         "gemini-2.0-flash",
     ]
     boot = {
@@ -331,10 +333,21 @@ def _chat_sync(body: ChatRequest) -> ChatResponse:
                 return ChatResponse(reply=reply, books=book_cards, mode_used=f"gemini:{model}")
             except Exception as exc:
                 reply = rule_agent.answer(message)
+                err_text = str(exc)
+                if "NOT_FOUND" in err_text or "not found" in err_text.lower():
+                    gemini_hint = (
+                        "Selected Gemini model is unavailable for this API key/version. "
+                        "Pick another Gemini model in the sidebar (for example gemini-2.0-flash or gemini-2.5-flash)."
+                    )
+                else:
+                    gemini_hint = (
+                        "If you see quota (429), wait a minute or check limits at "
+                        "https://ai.google.dev/gemini-api/docs/rate-limits"
+                    )
                 return ChatResponse(
                     reply=(
                         f"⚠️ Gemini error ({exc}). "
-                        "If you see quota (429), wait a minute or check limits at https://ai.google.dev/gemini-api/docs/rate-limits — "
+                        f"{gemini_hint} — "
                         "showing rule-based results.\n\n"
                         + reply
                     ),
@@ -455,6 +468,8 @@ async def health() -> JSONResponse:
             with Session(get_business_engine()) as biz_sess, Session(get_quick_query_engine()) as quick_sess:
                 business_count = biz_sess.query(Book).count()
                 quick_count = quick_sess.query(BookSearchIndex).count()
+                if business_count > 0 and quick_count < business_count:
+                    status = "degraded"
         except Exception:
             pass
     return JSONResponse(
