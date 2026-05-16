@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: ai-library-agent
+    env: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn src.web.app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: DATA_DIR
+        value: /var/data
+      - key: SKIP_OLLAMA_PROBE
+        value: "1"
+      - key: ALLOW_SAMPLE_SEED
+        value: "0"
+      - key: GEMINI_MODEL
+        value: gemini-2.0-flash-lite
+      - key: CLOUD_LLM_PER_CALL_TIMEOUT
+        value: "40"
+      - key: GEMINI_TOTAL_BUDGET_SEC
+        value: "55"
+      - key: GEMINI_MIN_CALL_TIMEOUT
+        value: "20"
+      - key: GEMINI_API_KEY
+        sync: false
+disks:
+  - name: ai-library-data
+    mountPath: /var/data
+    sizeGB: 2

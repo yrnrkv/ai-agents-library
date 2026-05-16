@@ -49,7 +49,9 @@ def _ensure_dbs_ready() -> None:
         # Keep quick index in sync without overwriting a richer existing quick DB.
         quick_count = quick_sess.query(BookSearchIndex).count()
         business_count = biz_sess.query(Book).count()
-        if business_count == 0 and quick_count == 0:
+        # Seed tiny sample data only in explicit demo mode.
+        allow_sample_seed = os.getenv("ALLOW_SAMPLE_SEED", "").lower() in {"1", "true", "yes"}
+        if allow_sample_seed and business_count == 0 and quick_count == 0:
             seed_business_sample_data(biz_sess)
             business_count = biz_sess.query(Book).count()
         # Business DB is the source of truth only when it has at least as many rows.

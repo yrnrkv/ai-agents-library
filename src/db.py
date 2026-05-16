@@ -1,15 +1,40 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from sqlalchemy import create_engine, text
 
-from .config import BUSINESS_DB_PATH, QUICK_QUERY_DB_PATH, DATA_DIR
+from .config import BUSINESS_DB_PATH, QUICK_QUERY_DB_PATH, DATA_DIR, ROOT_DIR
 from .models import BaseBusiness, BaseQuickQuery
 
 # Shared engines (FastAPI runs blocking chat/catalog in thread pool workers).
 _business_engine = None
 _quick_engine = None
+
+
+def _copy_if_missing(src: Path, dst: Path) -> bool:
+    """Copy a DB file only when destination does not already exist."""
+    if dst.exists() or not src.exists():
+        return False
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    return True
+
+
+def _bootstrap_data_dir_from_repo_snapshot() -> int:
+    """
+    First Render boot can start with an empty persistent disk.
+    If repo-shipped DB snapshots exist, copy them once into DATA_DIR.
+    """
+    bundled_dir = ROOT_DIR / "data"
+    if bundled_dir.resolve() == DATA_DIR.resolve():
+        return 0
+
+    copied = 0
+    copied += int(_copy_if_missing(bundled_dir / "business.db", Path(BUSINESS_DB_PATH)))
+    copied += int(_copy_if_missing(bundled_dir / "quick_query.db", Path(QUICK_QUERY_DB_PATH)))
+    return copied
 
 
 def dispose_engines() -> None:
@@ -59,6 +84,7 @@ def migrate_quick_query_schema(quick_engine) -> None:
 
 def init_databases(reset: bool = False) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _bootstrap_data_dir_from_repo_snapshot()
 
     if reset:
         dispose_engines()

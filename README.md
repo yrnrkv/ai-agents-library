@@ -9,6 +9,23 @@ A complete local demo for your AI Library project task:
 - Demo AI agent that answers library questions from the Quick Query DB
 - Optional LangChain wrapper (`--langchain-chat` or `--ollama-chat`) that uses an LLM to summarize DB results
 
+## Deploy on Render (Gemini + full catalog)
+
+This repo includes `render.yaml` for one-click Blueprint deploy.
+
+1. Push this repo to GitHub.
+2. In Render, create a new Blueprint from your repo.
+3. Set secret `GEMINI_API_KEY` in Render environment variables.
+4. Keep `DATA_DIR=/var/data` and attached disk enabled (defined in `render.yaml`).
+5. Deploy and verify:
+   - `GET /api/health` should show:
+     - `gemini_configured: true`
+     - `business_books` ~= `quick_index_books` (for this dataset: ~514)
+
+Notes:
+- Startup does **not** seed the tiny sample dataset unless `ALLOW_SAMPLE_SEED=1`.
+- On first boot with an empty disk, app bootstraps DB files from repo `data/` into `DATA_DIR`.
+
 ## 1) Setup
 
 ```bash
@@ -154,7 +171,8 @@ ollama pull qwen2.5:7b-instruct
 uvicorn src.web.app:app --reload
 ```
 
-The server auto-initializes and seeds the database on first run.  
+The server auto-initializes DB schema on first run.  
+Sample seed data is only inserted when `ALLOW_SAMPLE_SEED=1` (or via CLI `--seed-sample`).  
 Open **http://127.0.0.1:8000** in your browser.
 
 ### Usage
