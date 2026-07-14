@@ -2,7 +2,10 @@ services:
   - type: web
     name: ai-library-agent
     env: python
-    plan: starter
+    # Free tier: $0, no persistent disk. First visit after idle has a ~50s
+    # cold start. To keep it always-on (no cold start), change `free` to
+    # `starter` and re-add a disk (see the commented block at the bottom).
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn src.web.app:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/health
@@ -10,8 +13,7 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: "3.11.9"
-      - key: DATA_DIR
-        value: /var/data
+      # No DATA_DIR set → the app uses the repo-bundled data/ (39-book catalog).
       - key: SKIP_OLLAMA_PROBE
         value: "1"
       - key: ALLOW_SAMPLE_SEED
@@ -24,9 +26,14 @@ services:
         value: "55"
       - key: GEMINI_MIN_CALL_TIMEOUT
         value: "20"
+      # Set this secret in the Render dashboard (Environment tab).
       - key: GEMINI_API_KEY
         sync: false
-disks:
-  - name: ai-library-data
-    mountPath: /var/data
-    sizeGB: 2
+
+# --- Always-on option (paid) -------------------------------------------------
+# To avoid cold starts, set `plan: starter` above, add `DATA_DIR=/var/data` to
+# envVars, and uncomment this disk:
+# disks:
+#   - name: ai-library-data
+#     mountPath: /var/data
+#     sizeGB: 2
