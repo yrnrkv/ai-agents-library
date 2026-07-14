@@ -280,7 +280,13 @@ class LangChainLibraryAgent:
                 if m and m not in models:
                     models.append(m)
 
+        # Cap how many models we try. On free-tier keys every attempt spends a
+        # request against a small daily quota, so hammering ~50 models on a 429
+        # burns the quota and just delays a clear error. 3 is plenty of fallback.
+        models = models[:3]
+
         last_err: Optional[Exception] = None
+        quota_err: Optional[Exception] = None
         for model_name in models:
             if time.monotonic() >= deadline:
                 break
@@ -305,6 +311,13 @@ class LangChainLibraryAgent:
                     last_err = e
                     err_text = str(e)
                     if "429" in err_text or "RESOURCE_EXHAUSTED" in err_text:
+                        # Remember quota errors so the final message is clear even
+                        # if a later attempt fails with a budget-shrunk timeout.
+                        quota_err = RuntimeError(
+                            "Gemini free-tier quota reached (HTTP 429). Wait ~1 minute and "
+                            "retry, pick a different model, or enable billing on the key. "
+                            "Meanwhile the assistant is showing catalog results."
+                        )
                         delay_m = re.search(r"retry in ([\d.]+)s", err_text, re.I)
                         base = float(delay_m.group(1)) + 1.0 if delay_m else 4.0
                         delay = min(15.0, base, max(0.0, deadline - time.monotonic() - 2.0))
@@ -312,6 +325,10 @@ class LangChainLibraryAgent:
                             time.sleep(delay)
                         continue
                     break
+
+        # Prefer surfacing a quota error over a misleading "timed out in Ns".
+        if quota_err is not None:
+            raise quota_err
         if last_err:
             raise last_err
         raise RuntimeError("Gemini invocation failed with no exception detail")
