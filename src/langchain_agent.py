@@ -213,25 +213,32 @@ class LangChainLibraryAgent:
         # Lazily select model on first query; we may not have Ollama running yet.
         self.llm = None
 
-    def answer(self, user_query: str) -> str:
+    def answer(self, user_query: str, candidates: Optional[List[dict]] = None) -> str:
+        """Answer a query.
+
+        If ``candidates`` is provided (e.g. merged local + OpenLibrary results
+        supplied by the web layer), the LLM recommends from that list instead of
+        only the local catalog. Pass ``None`` to fall back to a local DB search.
+        """
         wants_books = user_wants_book_catalog_results(user_query)
 
         # If caller requested Ollama (free local models), do that first.
         if self.provider == "ollama":
-            return self._answer_with_ollama(user_query, wants_books=wants_books)
+            return self._answer_with_ollama(user_query, wants_books=wants_books, candidates=candidates)
 
         # If we have a cloud / OpenAI-compatible LLM, use it.
         if self.llm is not None:
-            candidates: List[dict] = []
-            if wants_books:
-                limit = self._extract_limit(user_query, default=5)
-                candidates = self.rule_agent.search_structured(user_query, limit=limit)
+            if candidates is None:
+                candidates = []
+                if wants_books:
+                    limit = self._extract_limit(user_query, default=5)
+                    candidates = self.rule_agent.search_structured(user_query, limit=limit)
             prompt = self._build_prompt(user_query=user_query, candidates=candidates)
             return self._invoke_cloud_llm(prompt)
 
         # Auto mode: no OpenAI, so try Ollama for free.
         if self.provider == "auto":
-            return self._answer_with_ollama(user_query, wants_books=wants_books)
+            return self._answer_with_ollama(user_query, wants_books=wants_books, candidates=candidates)
 
         return self.rule_agent.answer(user_query)
 
@@ -309,9 +316,10 @@ class LangChainLibraryAgent:
             raise last_err
         raise RuntimeError("Gemini invocation failed with no exception detail")
 
-    def _answer_with_ollama(self, user_query: str, *, wants_books: bool) -> str:
-        limit = self._extract_limit(user_query, default=5)
-        candidates = self.rule_agent.search_structured(user_query, limit=limit) if wants_books else []
+    def _answer_with_ollama(self, user_query: str, *, wants_books: bool, candidates: Optional[List[dict]] = None) -> str:
+        if candidates is None:
+            limit = self._extract_limit(user_query, default=5)
+            candidates = self.rule_agent.search_structured(user_query, limit=limit) if wants_books else []
 
         try:
             from langchain_ollama import ChatOllama
@@ -375,13 +383,15 @@ class LangChainLibraryAgent:
     def _build_prompt(*, user_query: str, candidates: List[dict]) -> str:
         if candidates:
             return (
-                "You are a helpful AI assistant.\n"
-                "The user asked for book recommendations or to find books in the library.\n"
-                "Use ONLY the provided candidates; recommend from this list when appropriate.\n"
-                "For each recommended book, include the EXACT title string and its numeric catalog id (field id).\n"
-                "Keep the answer focused on these books; do not invent titles not in the JSON.\n\n"
+                "You are a helpful library assistant.\n"
+                "The user asked for book recommendations or to find books.\n"
+                "Recommend from the provided candidates; do NOT invent titles that are not in the JSON.\n"
+                "Each candidate has a 'source' (for example an in-house library or OpenLibrary). "
+                "When recommending, give the EXACT title and the author, and briefly say why it fits.\n"
+                "If a candidate lists a 'url', you may mention that the book can be opened there.\n"
+                "Keep the answer concise and focused on these books.\n\n"
                 f"User question: {user_query}\n\n"
-                f"Library candidates (JSON): {json.dumps(candidates, ensure_ascii=False)}\n\n"
+                f"Candidate books (JSON): {json.dumps(candidates, ensure_ascii=False)}\n\n"
                 "Answer:"
             )
 

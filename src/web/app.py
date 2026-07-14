@@ -295,6 +295,83 @@ def _catalog_book_detail_sync(business_book_id: int) -> CatalogBook:
         )
 
 
+def _discover_openlibrary_sync(q: str, page: int, limit: int) -> dict:
+    """Search OpenLibrary live (no download / no DB writes).
+
+    Returns book cards with real covers and direct OpenLibrary links, so the
+    catalog can browse millions of titles on demand without importing them.
+    """
+    q = q.strip()
+    page = max(1, page)
+    limit = max(1, min(limit, 50))
+    if not q:
+        return {"total": 0, "page": page, "limit": limit, "books": []}
+
+    params = {
+        "q": q,
+        "page": str(page),
+        "limit": str(limit),
+        "fields": "key,title,author_name,first_publish_year,subject,cover_i, isbn",
+    }
+    try:
+        resp = httpx.get(
+            "https://openlibrary.org/search.json",
+            params=params,
+            timeout=12.0,
+            headers={"User-Agent": "ai-library-agent/1.0 (demo)"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:  # network blocked / offline / rate-limited
+        raise HTTPException(status_code=502, detail=f"OpenLibrary lookup failed: {exc}")
+
+    books: List[dict] = []
+    for doc in data.get("docs", []):
+        title = doc.get("title") or "Untitled"
+        authors = doc.get("author_name") or []
+        author = ", ".join(authors[:2]) if authors else "Unknown author"
+        subjects = doc.get("subject") or []
+        category = subjects[0] if subjects else ""
+        cover_i = doc.get("cover_i")
+        cover_url = (
+            f"https://covers.openlibrary.org/b/id/{cover_i}-M.jpg" if cover_i else None
+        )
+        key = doc.get("key") or ""  # e.g. "/works/OL12345W"
+        ol_url = f"https://openlibrary.org{key}" if key else None
+        from urllib.parse import quote_plus
+
+        amazon_q = quote_plus(f"{title} {author}")
+        books.append(
+            {
+                "id": key or title,
+                "title": title,
+                "author": author,
+                "category": category,
+                "published_year": doc.get("first_publish_year"),
+                "cover_image_url": cover_url,
+                "openlibrary_url": ol_url,
+                "amazon_url": f"https://www.amazon.com/s?k={amazon_q}",
+                "sources": [{"name": "OpenLibrary (live)", "url": ol_url}],
+            }
+        )
+
+    return {
+        "total": data.get("numFound", len(books)),
+        "page": page,
+        "limit": limit,
+        "books": books,
+    }
+
+
+def _openlibrary_chat_cards(query: str, limit: int = 6) -> List[dict]:
+    """Best-effort live OpenLibrary results for chat. Never raises."""
+    try:
+        result = _discover_openlibrary_sync(query, page=1, limit=limit)
+        return result.get("books", [])
+    except Exception:
+        return []
+
+
 def _chat_sync(body: ChatRequest) -> ChatResponse:
     """Blocking LLM + DB work; run via asyncio.to_thread so health checks stay responsive."""
     message = body.message.strip()
@@ -311,7 +388,28 @@ def _chat_sync(body: ChatRequest) -> ChatResponse:
         from ..agent import LibraryAgent
 
         rule_agent = LibraryAgent(session)
-        book_cards = rule_agent.search_structured(message) if user_wants_book_catalog_results(message) else []
+        wants_books = user_wants_book_catalog_results(message)
+
+        # Merge the curated local catalog with a live OpenLibrary search so the
+        # assistant can recommend real books beyond the small in-house dataset.
+        local_cards = rule_agent.search_structured(message)[:4] if wants_books else []
+        online_cards = _openlibrary_chat_cards(message, limit=6) if wants_books else []
+        book_cards = local_cards + online_cards
+
+        # Compact candidate list passed to the LLM prompt (title/author/source/url).
+        llm_candidates: Optional[List[dict]] = None
+        if wants_books:
+            llm_candidates = [
+                {
+                    "title": c.get("title"),
+                    "author": c.get("author"),
+                    "category": c.get("category"),
+                    "published_year": c.get("published_year"),
+                    "source": (c.get("sources") or [{}])[0].get("name", "library"),
+                    "url": c.get("openlibrary_url") or c.get("primary_source_url"),
+                }
+                for c in book_cards
+            ]
 
         if mode == "gemini":
             if not (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")):
@@ -331,7 +429,7 @@ def _chat_sync(body: ChatRequest) -> ChatResponse:
                 lc_agent = LangChainLibraryAgent(session, provider="gemini", gemini_model=model)
                 if lc_agent.llm is None:
                     raise RuntimeError("Gemini client failed to initialize (check langchain-google-genai install)")
-                reply = lc_agent.answer(message)
+                reply = lc_agent.answer(message, candidates=llm_candidates)
                 return ChatResponse(reply=reply, books=book_cards, mode_used=f"gemini:{model}")
             except Exception as exc:
                 reply = rule_agent.answer(message)
@@ -375,7 +473,7 @@ def _chat_sync(body: ChatRequest) -> ChatResponse:
                 lc_agent = LangChainLibraryAgent(session, provider="groq", groq_model=model)
                 if lc_agent.llm is None:
                     raise RuntimeError("Groq client failed to initialize")
-                reply = lc_agent.answer(message)
+                reply = lc_agent.answer(message, candidates=llm_candidates)
                 return ChatResponse(reply=reply, books=book_cards, mode_used=f"groq:{model}")
             except Exception as exc:
                 reply = rule_agent.answer(message)
@@ -405,7 +503,7 @@ def _chat_sync(body: ChatRequest) -> ChatResponse:
                     provider="ollama",
                     ollama_models=[model],
                 )
-                reply = lc_agent.answer(message)
+                reply = lc_agent.answer(message, candidates=llm_candidates)
                 return ChatResponse(reply=reply, books=book_cards, mode_used=f"ollama:{model}")
             except Exception as exc:
                 reply = rule_agent.answer(message)
@@ -436,6 +534,13 @@ async def catalog_books(
 @app.get("/api/catalog/books/{business_book_id}", response_model=CatalogBook)
 async def catalog_book_detail(business_book_id: int) -> CatalogBook:
     return await asyncio.to_thread(_catalog_book_detail_sync, business_book_id)
+
+
+@app.get("/api/discover/books")
+async def discover_books(q: str = "", page: int = 1, limit: int = 24) -> JSONResponse:
+    """Live OpenLibrary search — browse millions of titles without importing them."""
+    result = await asyncio.to_thread(_discover_openlibrary_sync, q, page, limit)
+    return JSONResponse(result)
 
 
 @app.post("/api/chat", response_model=ChatResponse)

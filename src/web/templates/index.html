@@ -96,6 +96,10 @@
 
       <section class="panel" id="panel-catalog" aria-labelledby="tabCatalog" hidden>
         <div class="catalog-toolbar">
+          <select id="catalogMode" class="input catalog-mode" aria-label="Catalog source">
+            <option value="local">📚 Our library</option>
+            <option value="discover">🌐 Discover online (OpenLibrary)</option>
+          </select>
           <input type="search" id="catalogSearch" class="input catalog-search" placeholder="Search title, author, topic…" autocomplete="off" />
           <input type="text" id="catalogSource" class="input catalog-source" placeholder="Filter by source (e.g. HKPL)" />
           <button type="button" class="btn-secondary" id="catalogReload">Search</button>
@@ -292,17 +296,11 @@
           <div class="library-card-body">
             <div class="library-card-title">${escHtml(b.title)}</div>
             <div class="library-card-author">${escHtml(b.author)}</div>
+            ${subjectYearLine(b)}
             <div class="library-card-meta">${srcTags}</div>
-            <button type="button" class="btn-link" data-book-id="${b.id}">View in catalog</button>
+            <div class="library-card-links">${bookLinks(b)}</div>
           </div>`;
         wrap.appendChild(card);
-      });
-
-      wrap.querySelectorAll('[data-book-id]').forEach(btn => {
-        btn.addEventListener('click', () => {
-          document.getElementById('tabCatalog').click();
-          openBookModal(parseInt(btn.getAttribute('data-book-id'), 10));
-        });
       });
 
       const row = document.createElement('div');
@@ -365,6 +363,24 @@
     let catalogOffset = 0;
     const catalogPageSize = 100;
 
+    function bookLinks(b) {
+      // Direct link when we have one (live OpenLibrary results); otherwise a
+      // reliable search link built from title + author so every card is "real".
+      const query = encodeURIComponent(`${b.title || ''} ${b.author || ''}`.trim());
+      const olUrl = b.openlibrary_url || `https://openlibrary.org/search?q=${query}`;
+      const amazonUrl = b.amazon_url || `https://www.amazon.com/s?k=${query}`;
+      return `
+        <a class="card-link card-link-primary" href="${escHtml(olUrl)}" target="_blank" rel="noopener">OpenLibrary ↗</a>
+        <a class="card-link" href="${escHtml(amazonUrl)}" target="_blank" rel="noopener">Amazon ↗</a>`;
+    }
+
+    function subjectYearLine(b) {
+      const parts = [];
+      if (b.category) parts.push(`<span class="subject">${escHtml(b.category)}</span>`);
+      if (b.published_year) parts.push(`<span>${escHtml(String(b.published_year))}</span>`);
+      return parts.length ? `<div class="library-card-sub">${parts.join('<span>·</span>')}</div>` : '';
+    }
+
     function appendCatalogCards(books) {
       const grid = document.getElementById('catalogGrid');
       books.forEach(b => {
@@ -372,7 +388,7 @@
         art.className = 'library-card';
         const imgUrl = b.cover_image_url;
         const cover = imgUrl
-          ? `<img class="library-cover" src="${escHtml(imgUrl)}" alt="" loading="lazy" />`
+          ? `<img class="library-cover" src="${escHtml(imgUrl)}" alt="" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'library-cover-ph',textContent:${JSON.stringify((b.title || '?').slice(0,1))}}))" />`
           : `<div class="library-cover-ph">${escHtml((b.title || '?').slice(0, 1))}</div>`;
         const tags = (b.sources || []).map(s => `<span class="tag tag-src">${escHtml(s.name)}</span>`).join('');
         art.innerHTML = `
@@ -380,19 +396,18 @@
           <div class="library-card-body">
             <h3 class="library-card-title">${escHtml(b.title)}</h3>
             <p class="library-card-author">${escHtml(b.author)}</p>
+            ${subjectYearLine(b)}
             <div class="library-card-meta">${tags}</div>
-            <button type="button" class="btn-secondary btn-small" data-open="${b.id}">Details</button>
+            <div class="library-card-links">${bookLinks(b)}</div>
           </div>`;
         grid.appendChild(art);
       });
     }
 
-    document.getElementById('catalogGrid').addEventListener('click', e => {
-      const btn = e.target.closest('[data-open]');
-      if (btn) openBookModal(parseInt(btn.getAttribute('data-open'), 10));
-    });
+    let catalogPage = 1;   // used by discover (online) mode
 
     async function loadCatalog(reset) {
+      const mode = document.getElementById('catalogMode').value;
       const q = document.getElementById('catalogSearch').value.trim();
       const source = document.getElementById('catalogSource').value.trim();
       const grid = document.getElementById('catalogGrid');
@@ -400,22 +415,35 @@
       const wrap = document.getElementById('catalogLoadMoreWrap');
       const loadBtn = document.getElementById('catalogLoadMore');
 
+      if (mode === 'discover' && !q) {
+        grid.innerHTML = '<p class="catalog-loading">Type a search above to discover books from OpenLibrary (millions of titles, live).</p>';
+        meta.textContent = '';
+        wrap.hidden = true;
+        return;
+      }
+
       if (reset) {
         catalogOffset = 0;
+        catalogPage = 1;
         grid.innerHTML = '<p class="catalog-loading">Loading…</p>';
       } else {
         loadBtn.disabled = true;
       }
 
-      const params = new URLSearchParams({
-        limit: String(catalogPageSize),
-        offset: String(catalogOffset),
-      });
-      if (q) params.set('q', q);
-      if (source) params.set('source', source);
+      let url;
+      if (mode === 'discover') {
+        const p = new URLSearchParams({ q, page: String(catalogPage), limit: '24' });
+        url = '/api/discover/books?' + p.toString();
+      } else {
+        const p = new URLSearchParams({ limit: String(catalogPageSize), offset: String(catalogOffset) });
+        if (q) p.set('q', q);
+        if (source) p.set('source', source);
+        url = '/api/catalog/books?' + p.toString();
+      }
 
       try {
-        const res = await fetch('/api/catalog/books?' + params.toString());
+        const res = await fetch(url);
+        if (!res.ok) throw new Error('request failed');
         const data = await res.json();
         if (reset) {
           grid.innerHTML = '';
@@ -423,15 +451,30 @@
           grid.querySelector('.catalog-loading')?.remove();
         }
         appendCatalogCards(data.books);
-        catalogOffset += data.books.length;
-        meta.textContent = `Showing ${catalogOffset} of ${data.total} books`;
-        wrap.hidden = catalogOffset >= data.total || data.books.length === 0;
+
+        if (mode === 'discover') {
+          catalogOffset += data.books.length;
+          catalogPage += 1;
+          const src = 'OpenLibrary (live)';
+          meta.textContent = `Showing ${catalogOffset} of ${data.total.toLocaleString()} results from ${src}`;
+          wrap.hidden = data.books.length === 0 || catalogOffset >= data.total;
+        } else {
+          catalogOffset += data.books.length;
+          meta.textContent = `Showing ${catalogOffset} of ${data.total} books in our library`;
+          wrap.hidden = catalogOffset >= data.total || data.books.length === 0;
+        }
         loadBtn.disabled = false;
       } catch (e) {
-        if (reset) grid.innerHTML = '<p class="catalog-loading">Failed to load catalog.</p>';
+        if (reset) grid.innerHTML = '<p class="catalog-loading">Could not load results. If you are offline or OpenLibrary is blocked, try “Our library” mode.</p>';
         loadBtn.disabled = false;
       }
     }
+
+    document.getElementById('catalogMode').addEventListener('change', () => {
+      const discover = document.getElementById('catalogMode').value === 'discover';
+      document.getElementById('catalogSource').style.display = discover ? 'none' : '';
+      loadCatalog(true);
+    });
 
     document.getElementById('catalogReload').addEventListener('click', () => loadCatalog(true));
     document.getElementById('catalogLoadMore').addEventListener('click', () => loadCatalog(false));
