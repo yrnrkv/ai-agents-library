@@ -26,6 +26,7 @@ class LibraryAgent:
             )
 
         q = raw.lower()
+        limit = self._extract_limit(q)
 
         if "top rated" in q or "best rated" in q:
             books = (
